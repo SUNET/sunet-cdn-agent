@@ -1,0 +1,7 @@
+[manager]
+username = "username"
+password = "password"
+url = "http://localhost:8081"
+
+[confwriter]
+root_dir = "/tmp/sunet-cdn-agent"

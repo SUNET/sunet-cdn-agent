@@ -1,0 +1,79 @@
+version: "3.9"
+services:
+  haproxy:
+    # This is the official haproxy-supported container.
+    image: "docker.io/haproxytech/haproxy-debian:2.9.6"
+    volumes:
+      - /opt/sunet-cdn/customers/customer1/conf/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - /opt/sunet-cdn/customers/customer1/shared:/shared
+      - /opt/sunet-cdn/customers/customer1/certs:/certs:ro
+      - /opt/sunet-cdn/customers/customer1/certs-private:/certs-private:ro
+    # The general (outdated?) advice is never to start haproxy as an
+    # unprivileged user for production purposes:
+    # https://docs.haproxy.org/2.9/management.html
+    # ... but looking at https://hub.docker.com/_/haproxy it states:
+    # ===
+    # Note: the 2.4+ versions of the container will run as USER haproxy by
+    # default (hence the --sysctl net.ipv4.ip_unprivileged_port_start=0 above),
+    # but older versions still default to root for compatibility reasons; use
+    # --user haproxy (or any other UID) if you want to run as non-root in older
+    # versions.
+    # ===
+    # ... So it seems reasonable to use a custom user even for haproxy. The
+    # very large uid/gid is used to have a reasonable guarantee that nothing in
+    # the normal system will ever collide with it, and is inspired by what
+    # the OpenShift kubernetes system does:
+    # https://www.redhat.com/en/blog/a-guide-to-openshift-and-uids#
+    user: {{.UID}}:{{.UID}}
+    # Setting network_mode is done to not involve overhead of NAT, the
+    # idea is that it is one less state table to take care of in case of
+    # handling DDoS traffic, and it also means we will see real client IP
+    # addresses in haproxy for setting headers etc.
+    network_mode: "host"
+    # The following can not be used with network_mode: host so needs to be set
+    # in the global OS sysctl instead:
+    # ===
+    #sysctls:
+    #  - net.ipv4.ip_unprivileged_port_start=80
+    # ===
+  varnish:
+    # We build our own varnish with the slash vmod present. We use the slash
+    # "fellow" storage backend to be able to persist cached content to disk, so
+    # it is retained in case of a restart of the container or machine.
+    image: "platform.sunet.se/sunet-cdn/cdn-varnish:af7f7d11e61acf9f6113811615d1baa46daf3bd1"
+    # Use the same custom user as is used for haproxy.
+    user: {{.UID}}:{{.UID}}
+    volumes:
+      - /opt/sunet-cdn/customers/customer1/conf/varnish.vcl:/etc/varnish/varnish.vcl:ro
+      - /opt/sunet-cdn/customers/customer1/shared:/shared
+      - /opt/sunet-cdn/customers/customer1/cache:/cache
+    # From https://www.varnish-software.com/developers/tutorials/running-varnish-docker/:
+    # ===
+    # The /var/lib/varnish folder is frequently accessed by the varnishd
+    # program. Loading this folder into memory and accessing it through tmpfs
+    # would accelerate access to this folder.
+    # ===
+    # Using the subfolder "varnishd" is an updated expectation, see
+    # https://github.com/varnish/docker-varnish/issues/51
+    tmpfs:
+      - /var/lib/varnish/varnishd:exec,uid={{.UID}}
+    # Varnish does not need to listen to any network ports as all communication
+    # between it and haproxy happens over a UNIX socket.
+    command: [
+      "-E",
+      "/usr/lib/varnish/vmods/libvmod_slash.so",
+      "-a",
+      "/shared/varnish.sock,PROXY,mode=600",
+     "-f",
+     "/etc/varnish/varnish.vcl",
+     "-p",
+     "feature=+http2",
+     "-s",
+     "fellow=fellow,/cache/fellow-storage,512MB,512MB,10MB",
+    ]
+    # Allow io_uring operations expected by slash fellow.
+    security_opt:
+      - seccomp:/opt/sunet-cdn/conf/varnish-slash-seccomp.json
+    # Fix error log: "varnish-1  | Info: Child (29) said fellow_io_uring_register_buffers: fellow_io_uring_register_buffers Cannot allocate memory (12)"
+    ulimits:
+      memlock: -1

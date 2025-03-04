@@ -15,8 +15,9 @@ var cfgFile string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "sunet-cdn-agent",
-	Short: "Agent that runs on server nodes",
+	Use:          "sunet-cdn-agent",
+	SilenceUsage: true,
+	Short:        "Agent that runs on server nodes",
 	Long: `The agent runs on cache and l4lb nodes and fetches config from sunet-cdn-manager.
 
 This is the application that manages runtime configuration of server nodes.`,

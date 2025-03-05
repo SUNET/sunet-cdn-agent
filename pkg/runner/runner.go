@@ -40,7 +40,8 @@ type managerSettings struct {
 }
 
 type confWriterSettings struct {
-	RootDir string `mapstructure:"root_dir" validate:"required"`
+	RootDir    string `mapstructure:"root_dir" validate:"required"`
+	SystemdDir string `mapstructure:"systemd_dir" validate:"required"`
 }
 
 //go:embed templates/compose/default.template
@@ -525,9 +526,7 @@ mainLoop:
 						ServiceName: service.Name,
 					}
 
-					// systemdBasePath := "/etc/systemd/system"
-					systemdBasePath := "/tmp/sunet-cdn-agent"
-					err = agt.buildCacheSystemdService(systemdBasePath, cssc, org.ID.String(), service.ID.String())
+					err = agt.buildCacheSystemdService(agt.conf.ConfWriter.SystemdDir, cssc, org.ID.String(), service.ID.String())
 					if err != nil {
 						agt.logger.Fatal().Err(err).Msg("generating service conf failed")
 					}
@@ -579,7 +578,10 @@ func Run(logger zerolog.Logger) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	logger.Info().Msg("agent is running")
+	_, err = os.Stat(conf.ConfWriter.SystemdDir)
+	if err != nil {
+		return fmt.Errorf("unable to find SystemD path '%s', this is required for the agent to work", conf.ConfWriter.SystemdDir)
+	}
 
 	c := &http.Client{
 		Timeout: 15 * time.Second,

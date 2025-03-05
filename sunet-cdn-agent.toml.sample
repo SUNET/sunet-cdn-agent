@@ -5,3 +5,4 @@ url = "http://localhost:8081"
 
 [confwriter]
 root_dir = "/tmp/sunet-cdn-agent"
+systemd_dir = "/etc/systemd/system"

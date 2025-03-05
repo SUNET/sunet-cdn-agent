@@ -22,9 +22,9 @@ WorkingDirectory=/
 # To make docker pull work with basic-auth credentials
 Environment="HOME=/root"
 
-ExecStart=/usr/bin/docker compose -f /opt/sunet-cdn/compose/{{.OrgID}}/cdn-cache-{{.ServiceID}}/docker-compose.yml up --force-recreate --no-deps
+ExecStart=/usr/bin/docker compose -f {{.ComposeFile}} up --force-recreate --no-deps
 
-ExecStop=/usr/bin/docker compose -f /opt/sunet-cdn/compose/{{.OrgID}}/cdn-cache-{{.ServiceID}}/docker-compose.yml down
+ExecStop=/usr/bin/docker compose -f {{.ComposeFile}} down
 
 NotifyAccess=all
 

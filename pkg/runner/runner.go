@@ -140,7 +140,7 @@ func (agt *agent) createOrUpdateFile(filename string, content string) error {
 		contentSum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
 		if fileSum != contentSum {
-			agt.logger.Info().Str("file_sha256", fileSum).Str("content_sha256", contentSum).Msg("file content has changed, replacing file")
+			agt.logger.Info().Str("file_sha256", fileSum).Str("content_sha256", contentSum).Str("path", filename).Msg("file content has changed, replacing file")
 			err = agt.replaceFile(filename, content)
 			if err != nil {
 				return err
@@ -199,6 +199,7 @@ type cacheComposeConfig struct {
 }
 
 type cacheSystemdServiceConfig struct {
+	ComposeFile string
 	OrgID       string
 	OrgName     string
 	ServiceID   string
@@ -345,7 +346,7 @@ func (agt *agent) buildVarnishVCL(baseDir string, version types.ServiceVersionWi
 	return nil
 }
 
-func (agt *agent) buildCacheCompose(baseDir string, vcc cacheComposeConfig) error {
+func (agt *agent) buildCacheCompose(baseDir string, vcc cacheComposeConfig) (string, error) {
 	_, err := os.Stat(baseDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -353,11 +354,11 @@ func (agt *agent) buildCacheCompose(baseDir string, vcc cacheComposeConfig) erro
 			err := os.Mkdir(baseDir, 0o700)
 			if err != nil {
 				agt.logger.Err(err).Str("path", baseDir).Msg("unable to create directory")
-				return err
+				return "", err
 			}
 		} else {
 			agt.logger.Err(err).Str("path", baseDir).Msg("stat failed")
-			return err
+			return "", err
 		}
 	}
 
@@ -366,15 +367,15 @@ func (agt *agent) buildCacheCompose(baseDir string, vcc cacheComposeConfig) erro
 	cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, vcc)
 	if err != nil {
 		agt.logger.Fatal().Err(err).Msg("generating cache compose config failed")
-		return err
+		return "", err
 	}
 
 	err = agt.createOrUpdateFile(composeFilePath, cacheCompose)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return nil
+	return composeFilePath, nil
 }
 
 func (agt *agent) buildCacheSystemdService(baseDir string, cssc cacheSystemdServiceConfig, orgID string, serviceID string) error {
@@ -511,12 +512,13 @@ mainLoop:
 					}
 
 					composeBasePath := filepath.Join(servicePath, "compose")
-					err = agt.buildCacheCompose(composeBasePath, ccc)
+					composeFile, err := agt.buildCacheCompose(composeBasePath, ccc)
 					if err != nil {
 						break fileLoop
 					}
 
 					cssc := cacheSystemdServiceConfig{
+						ComposeFile: composeFile,
 						OrgID:       org.ID.String(),
 						OrgName:     org.Name,
 						ServiceID:   service.ID.String(),

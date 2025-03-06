@@ -24,7 +24,7 @@ services:
     # the normal system will ever collide with it, and is inspired by what
     # the OpenShift kubernetes system does:
     # https://www.redhat.com/en/blog/a-guide-to-openshift-and-uids#
-    user: {{.UID}}:{{.UID}}
+    user: {{.HAProxyUID}}:{{.GID}}
     # Setting network_mode is done to not involve overhead of NAT, the
     # idea is that it is one less state table to take care of in case of
     # handling DDoS traffic, and it also means we will see real client IP
@@ -42,7 +42,7 @@ services:
     # it is retained in case of a restart of the container or machine.
     image: "platform.sunet.se/sunet-cdn/cdn-varnish:af7f7d11e61acf9f6113811615d1baa46daf3bd1"
     # Use the same custom user as is used for haproxy.
-    user: {{.UID}}:{{.UID}}
+    user: {{.VarnishUID}}:{{.GID}}
     volumes:
       - /opt/sunet-cdn/customers/customer1/conf/varnish.vcl:/etc/varnish/varnish.vcl:ro
       - /opt/sunet-cdn/customers/customer1/shared:/shared
@@ -56,7 +56,7 @@ services:
     # Using the subfolder "varnishd" is an updated expectation, see
     # https://github.com/varnish/docker-varnish/issues/51
     tmpfs:
-      - /var/lib/varnish/varnishd:exec,uid={{.UID}}
+      - /var/lib/varnish/varnishd:exec,uid={{.VarnishUID}}
     # Varnish does not need to listen to any network ports as all communication
     # between it and haproxy happens over a UNIX socket.
     command: [

@@ -196,7 +196,9 @@ func (agt *agent) getCacheNodeConfig() (types.CacheNodeConfig, error) {
 }
 
 type cacheComposeConfig struct {
-	UID int64
+	HAProxyUID int64
+	VarnishUID int64
+	GID        int64
 }
 
 type cacheSystemdServiceConfig struct {
@@ -509,7 +511,9 @@ mainLoop:
 					}
 
 					ccc := cacheComposeConfig{
-						UID: service.UID,
+						HAProxyUID: service.UIDRangeFirst,
+						VarnishUID: service.UIDRangeFirst + 1,
+						GID:        service.UIDRangeFirst,
 					}
 
 					composeBasePath := filepath.Join(servicePath, "compose")

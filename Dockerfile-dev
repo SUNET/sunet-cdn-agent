@@ -1,0 +1,12 @@
+# Dockerfile used to make it easy to run an agent developed locally on e.g.
+# macOS in a linux environment.
+# The idea is that both the binary and config is built first and then mounted
+# into the container at startup, e.g.:
+# ===
+# docker build -t sunet-cdn-agent:latest -f Dockerfile-dev .
+# GOOS=linux GOARCH=amd64 go build && docker run -v ./sunet-cdn-agent:/sunet-cdn-agent -v ./sunet-cdn-agent.toml:/sunet-cdn-agent.toml --rm -it sunet-cdn-agent:latest
+# ===
+FROM debian:12.9
+
+ENTRYPOINT ["/sunet-cdn-agent"]
+CMD ["run", "--config","/sunet-cdn-agent.toml"]

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,7 +54,7 @@ var cacheServiceTemplateFS embed.FS
 // use a single instance of Validate, it caches struct info
 var validate = validator.New(validator.WithRequiredStructEnabled())
 
-func (agt *agent) replaceFile(filename string, content string) error {
+func (agt *agent) replaceFile(filename string, uid int, gid int, content string) error {
 	tmpFilename := filename + ".tmp"
 	tmpFilenameFh, err := os.Create(filepath.Clean(tmpFilename))
 	if err != nil {
@@ -103,13 +104,24 @@ func (agt *agent) replaceFile(filename string, content string) error {
 		return err
 	}
 
+	// Set the correct owner and group
+	err = os.Chown(tmpFilename, uid, gid)
+	if err != nil {
+		agt.logger.Err(err).Str("src", tmpFilename).Str("dest", filename).Int("uid", uid).Int("gid", gid).Msg("unable to set uid/gid")
+		err = os.Remove(tmpFilename)
+		if err != nil {
+			agt.logger.Err(err).Str("path", tmpFilename).Msg("unable to remove temporary file after failing to set uid/gid")
+		}
+		return err
+	}
+
 	// Rename to real path
 	err = os.Rename(tmpFilename, filename)
 	if err != nil {
 		agt.logger.Err(err).Str("src", tmpFilename).Str("dest", filename).Msg("unable to rename file")
 		err = os.Remove(tmpFilename)
 		if err != nil {
-			agt.logger.Err(err).Str("path", tmpFilename).Msg("unable to remove temporary VCL file for cleanup")
+			agt.logger.Err(err).Str("path", tmpFilename).Msg("unable to remove temporary file for cleanup")
 		}
 		return err
 	}
@@ -117,12 +129,12 @@ func (agt *agent) replaceFile(filename string, content string) error {
 	return nil
 }
 
-func (agt *agent) createOrUpdateFile(filename string, content string) error {
-	_, err := os.Stat(filename)
+func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, content string) error {
+	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			agt.logger.Info().Str("path", filename).Msg("creating file")
-			err = agt.replaceFile(filename, content)
+			err = agt.replaceFile(filename, uid, gid, content)
 			if err != nil {
 				return err
 			}
@@ -131,7 +143,41 @@ func (agt *agent) createOrUpdateFile(filename string, content string) error {
 			return err
 		}
 	} else {
-		// The file exists, update it if the content is different
+		// The file exists, fix uid/gid if needed
+		if s, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
+			chownNeeded := false
+
+			if uid < 0 || uid > math.MaxUint32 {
+				agt.logger.Info().Str("path", filename).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("new UID does not fit in uint32")
+				return fmt.Errorf("uid %d does not fit in uint32", uid)
+			}
+			if s.Uid != uint32(uid) {
+				agt.logger.Info().Str("path", filename).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("updating file UID")
+				chownNeeded = true
+			}
+
+			if gid < 0 || gid > math.MaxUint32 {
+				agt.logger.Info().Str("path", filename).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("new GID does not fit in uint32")
+				return fmt.Errorf("gid %d does not fit in uint32", uid)
+			}
+			if s.Gid != uint32(gid) {
+				agt.logger.Info().Str("path", filename).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("updating file GID")
+				chownNeeded = true
+			}
+
+			if chownNeeded {
+				err = os.Chown(filename, uid, gid)
+				if err != nil {
+					agt.logger.Err(err).Str("path", filename).Uint32("old_uid", s.Uid).Int("new_uid", uid).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("chown failed")
+					return err
+				}
+			}
+		} else {
+			agt.logger.Error().Str("path", filename).Msg("unable to access Uid/Gid of filename, not running on linux?")
+			return errors.New("unable to access Uid/Gid")
+		}
+
+		// update content if it is different
 		fileSum, err := sha256SumFile(filename)
 		if err != nil {
 			agt.logger.Err(err).Str("path", filename).Msg("unable to get sha256 sum for existing file")
@@ -142,7 +188,7 @@ func (agt *agent) createOrUpdateFile(filename string, content string) error {
 
 		if fileSum != contentSum {
 			agt.logger.Info().Str("file_sha256", fileSum).Str("content_sha256", contentSum).Str("path", filename).Msg("file content has changed, replacing file")
-			err = agt.replaceFile(filename, content)
+			err = agt.replaceFile(filename, uid, gid, content)
 			if err != nil {
 				return err
 			}
@@ -323,25 +369,25 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
 	return nil
 }
 
-func (agt *agent) buildVarnishVCL(baseDir string, version types.ServiceVersionWithConfig) error {
-	varnishPath := filepath.Join(baseDir, "varnish")
-	_, err := os.Stat(varnishPath)
+func (agt *agent) buildConfFile(baseDir string, dirName string, fileName string, uid int, gid int, content string) error {
+	path := filepath.Join(baseDir, dirName)
+	_, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			agt.logger.Info().Str("path", varnishPath).Msg("creating directory path")
-			err := os.Mkdir(varnishPath, 0o700)
+			agt.logger.Info().Str("path", path).Msg("creating directory path")
+			err := os.Mkdir(path, 0o700)
 			if err != nil {
-				agt.logger.Err(err).Str("path", varnishPath).Msg("unable to create directory")
+				agt.logger.Err(err).Str("path", path).Msg("unable to create directory")
 				return err
 			}
 		} else {
-			agt.logger.Err(err).Str("path", varnishPath).Msg("stat failed")
+			agt.logger.Err(err).Str("path", path).Msg("stat failed")
 			return err
 		}
 	}
 
-	vclPath := filepath.Join(varnishPath, "varnish.vcl")
-	err = agt.createOrUpdateFile(vclPath, version.VCL)
+	filePath := filepath.Join(path, fileName)
+	err = agt.createOrUpdateFile(filePath, uid, gid, content)
 	if err != nil {
 		return err
 	}
@@ -373,7 +419,7 @@ func (agt *agent) buildCacheCompose(baseDir string, vcc cacheComposeConfig) (str
 		return "", err
 	}
 
-	err = agt.createOrUpdateFile(composeFilePath, cacheCompose)
+	err = agt.createOrUpdateFile(composeFilePath, int(vcc.VarnishUID), int(vcc.GID), cacheCompose)
 	if err != nil {
 		return "", err
 	}
@@ -407,7 +453,7 @@ func (agt *agent) buildCacheSystemdService(baseDir string, cssc cacheSystemdServ
 		return err
 	}
 
-	err = agt.createOrUpdateFile(systemdServiceFilePath, cacheSystemdService)
+	err = agt.createOrUpdateFile(systemdServiceFilePath, 0, 0, cacheSystemdService)
 	if err != nil {
 		return err
 	}
@@ -474,6 +520,10 @@ mainLoop:
 					}
 					slices.Sort(orderedVersions)
 
+					commonGID := service.UIDRangeFirst
+					haProxyUID := service.UIDRangeFirst + 1
+					varnishUID := service.UIDRangeFirst + 2
+
 					for _, versionNumber := range orderedVersions {
 						version := service.ServiceVersions[versionNumber]
 						strVersion := strconv.FormatInt(version.Version, 10)
@@ -497,8 +547,9 @@ mainLoop:
 							}
 						}
 
-						err = agt.buildVarnishVCL(versionPath, version)
+						err = agt.buildConfFile(versionPath, "varnish", "varnish.vcl", int(varnishUID), int(commonGID), version.VCL)
 						if err != nil {
+							agt.logger.Err(err).Msg("unable to build conf file")
 							break fileLoop
 						}
 
@@ -511,9 +562,9 @@ mainLoop:
 					}
 
 					ccc := cacheComposeConfig{
-						HAProxyUID: service.UIDRangeFirst,
-						VarnishUID: service.UIDRangeFirst + 1,
-						GID:        service.UIDRangeFirst,
+						HAProxyUID: haProxyUID,
+						VarnishUID: varnishUID,
+						GID:        commonGID,
 					}
 
 					composeBasePath := filepath.Join(servicePath, "compose")

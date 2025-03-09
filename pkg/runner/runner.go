@@ -547,9 +547,15 @@ mainLoop:
 							}
 						}
 
+						err = agt.buildConfFile(versionPath, "haproxy", "haproxy.cfg", int(haProxyUID), int(commonGID), version.HAProxyConfig)
+						if err != nil {
+							agt.logger.Err(err).Msg("unable to build HAProxy conf file")
+							break fileLoop
+						}
+
 						err = agt.buildConfFile(versionPath, "varnish", "varnish.vcl", int(varnishUID), int(commonGID), version.VCL)
 						if err != nil {
-							agt.logger.Err(err).Msg("unable to build conf file")
+							agt.logger.Err(err).Msg("unable to build VCL conf file")
 							break fileLoop
 						}
 

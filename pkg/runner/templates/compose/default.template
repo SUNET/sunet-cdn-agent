@@ -4,10 +4,17 @@ services:
     # This is the official haproxy-supported container.
     image: "docker.io/haproxytech/haproxy-debian:2.9.6"
     volumes:
-      - /opt/sunet-cdn/customers/customer1/conf/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - /opt/sunet-cdn/customers/customer1/shared:/shared
-      - /opt/sunet-cdn/customers/customer1/certs:/certs:ro
-      - /opt/sunet-cdn/customers/customer1/certs-private:/certs-private:ro
+      - {{.VersionBaseDir}}:/service-versions:ro
+      - {{.SharedDir}}:/shared
+      - {{.CertsDir}}:/certs:ro
+      - {{.CertsPrivateDir}}:/certs-private:ro
+    # Override default Cmd since we have the "active" symlink indirection to
+    # reach the configuration
+    command: [
+      "haproxy",
+      "-f",
+      "/service-versions/active/haproxy/haproxy.cfg",
+    ]
     # The general (outdated?) advice is never to start haproxy as an
     # unprivileged user for production purposes:
     # https://docs.haproxy.org/2.9/management.html
@@ -44,9 +51,9 @@ services:
     # Use the same custom user as is used for haproxy.
     user: {{.VarnishUID}}:{{.GID}}
     volumes:
-      - /opt/sunet-cdn/customers/customer1/conf/varnish.vcl:/etc/varnish/varnish.vcl:ro
-      - /opt/sunet-cdn/customers/customer1/shared:/shared
-      - /opt/sunet-cdn/customers/customer1/cache:/cache
+      - {{.VersionBaseDir}}:/service-versions:ro
+      - {{.SharedDir}}:/shared
+      - {{.CacheDir}}:/cache
     # From https://www.varnish-software.com/developers/tutorials/running-varnish-docker/:
     # ===
     # The /var/lib/varnish folder is frequently accessed by the varnishd
@@ -65,7 +72,7 @@ services:
       "-a",
       "/shared/varnish.sock,PROXY,mode=600",
      "-f",
-     "/etc/varnish/varnish.vcl",
+     "/service-versions/active/varnish/varnish.vcl",
      "-p",
      "feature=+http2",
      "-s",

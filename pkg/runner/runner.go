@@ -48,6 +48,9 @@ type confWriterSettings struct {
 //go:embed templates/compose/default.template
 var cacheComposeTemplateFS embed.FS
 
+//go:embed templates/seccomp/varnish-slash-seccomp.json
+var seccompTemplateFS embed.FS
+
 //go:embed templates/systemd-service/default.template
 var cacheServiceTemplateFS embed.FS
 
@@ -242,9 +245,14 @@ func (agt *agent) getCacheNodeConfig() (types.CacheNodeConfig, error) {
 }
 
 type cacheComposeConfig struct {
-	HAProxyUID int64
-	VarnishUID int64
-	GID        int64
+	VersionBaseDir  string
+	CacheDir        string
+	SharedDir       string
+	CertsDir        string
+	CertsPrivateDir string
+	HAProxyUID      int64
+	VarnishUID      int64
+	GID             int64
 }
 
 type cacheSystemdServiceConfig struct {
@@ -253,6 +261,17 @@ type cacheSystemdServiceConfig struct {
 	OrgName     string
 	ServiceID   string
 	ServiceName string
+}
+
+func generateSeccomp(tmpl *template.Template) (string, error) {
+	var b strings.Builder
+
+	err := tmpl.Execute(&b, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
 }
 
 func generateCacheCompose(tmpl *template.Template, ccc cacheComposeConfig) (string, error) {
@@ -278,8 +297,9 @@ func generateCacheSystemdService(tmpl *template.Template, cssc cacheSystemdServi
 }
 
 type templates struct {
-	cacheCompose *template.Template
-	cacheService *template.Template
+	cacheCompose     *template.Template
+	cacheService     *template.Template
+	slashSeccompFile *template.Template
 }
 
 type agent struct {
@@ -369,96 +389,197 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
 	return nil
 }
 
-func (agt *agent) buildConfFile(baseDir string, dirName string, fileName string, uid int, gid int, content string) error {
-	path := filepath.Join(baseDir, dirName)
-	_, err := os.Stat(path)
+func (agt *agent) buildConfFile(dirName string, fileName string, uid int, gid int, content string) (string, error) {
+	_, err := os.Stat(dirName)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			agt.logger.Info().Str("path", path).Msg("creating directory path")
-			err := os.Mkdir(path, 0o700)
+			agt.logger.Info().Str("path", dirName).Msg("creating directory path")
+			err := os.MkdirAll(dirName, 0o700)
 			if err != nil {
-				agt.logger.Err(err).Str("path", path).Msg("unable to create directory")
-				return err
-			}
-		} else {
-			agt.logger.Err(err).Str("path", path).Msg("stat failed")
-			return err
-		}
-	}
-
-	filePath := filepath.Join(path, fileName)
-	err = agt.createOrUpdateFile(filePath, uid, gid, content)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (agt *agent) buildCacheCompose(baseDir string, vcc cacheComposeConfig) (string, error) {
-	_, err := os.Stat(baseDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			agt.logger.Info().Str("path", baseDir).Msg("creating directory path")
-			err := os.Mkdir(baseDir, 0o700)
-			if err != nil {
-				agt.logger.Err(err).Str("path", baseDir).Msg("unable to create directory")
+				agt.logger.Err(err).Str("path", dirName).Msg("unable to create directory")
 				return "", err
 			}
 		} else {
-			agt.logger.Err(err).Str("path", baseDir).Msg("stat failed")
+			agt.logger.Err(err).Str("path", dirName).Msg("stat failed")
 			return "", err
 		}
 	}
 
-	composeFilePath := filepath.Join(baseDir, "docker-compose.yml")
-
-	cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, vcc)
-	if err != nil {
-		agt.logger.Fatal().Err(err).Msg("generating cache compose config failed")
-		return "", err
-	}
-
-	err = agt.createOrUpdateFile(composeFilePath, int(vcc.VarnishUID), int(vcc.GID), cacheCompose)
+	filePath := filepath.Join(dirName, fileName)
+	err = agt.createOrUpdateFile(filePath, uid, gid, content)
 	if err != nil {
 		return "", err
 	}
 
-	return composeFilePath, nil
+	return filePath, nil
 }
 
-func (agt *agent) buildCacheSystemdService(baseDir string, cssc cacheSystemdServiceConfig, orgID string, serviceID string) error {
-	_, err := os.Stat(baseDir)
+func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
+	confPath := filepath.Join(agt.conf.ConfWriter.RootDir, "conf")
+
+	// Handle things ordered by UUID or version, to make operations
+	// carry out in a determinstic order which is easier to follow.
+	orderedOrgs := []string{}
+	for orgUUID := range cnc.Orgs {
+		orderedOrgs = append(orderedOrgs, orgUUID)
+	}
+	slices.Sort(orderedOrgs)
+
+	slashSeccompContent, err := generateSeccomp(agt.templates.slashSeccompFile)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			agt.logger.Info().Str("path", baseDir).Msg("creating directory path")
-			err := os.Mkdir(baseDir, 0o700)
-			if err != nil {
-				agt.logger.Err(err).Str("path", baseDir).Msg("unable to create directory")
-				return err
+		agt.logger.Err(err).Msg("unable to generate slash seccomp content")
+		return
+	}
+
+	seccompDir := filepath.Join(confPath, "seccomp")
+	_, err = agt.buildConfFile(seccompDir, "varnish-slash-seccomp.json", 0, 0, slashSeccompContent)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create slash seccomp file")
+		return
+	}
+
+	// Expected directory structure:
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/varnish.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/haproxy/haproxy.cfg
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/varnish.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/haproxy/haproxy.cfg
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/active -> 2
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/work
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/compose/docker-compose.yml
+	//
+	// The reason for this specific layout is that we can
+	// mount the "shared" directory to all containers
+	// belonging to a given service and only change a
+	// single symlink (active) atomically and be sure that
+	// even in the event of a system crash/power outage all
+	// processes related to a given service will use config
+	// for the same version when they come up again after
+	// reboot.
+	for _, orgUUID := range orderedOrgs {
+		org := cnc.Orgs[orgUUID]
+		orgPath := filepath.Join(confPath, "orgs", org.ID.String())
+		fmt.Println(orgPath)
+
+		orderedServices := []string{}
+		for serviceUUID := range org.Services {
+			orderedServices = append(orderedServices, serviceUUID)
+		}
+		slices.Sort(orderedServices)
+
+		for _, serviceUUID := range orderedServices {
+			service := org.Services[serviceUUID]
+			servicePath := filepath.Join(orgPath, "services", service.ID.String())
+			fmt.Println(servicePath)
+
+			orderedVersions := []int64{}
+			for versionNumber := range service.ServiceVersions {
+				orderedVersions = append(orderedVersions, versionNumber)
 			}
-		} else {
-			agt.logger.Err(err).Str("path", baseDir).Msg("stat failed")
-			return err
+			slices.Sort(orderedVersions)
+
+			commonGID := service.UIDRangeFirst
+			haProxyUID := service.UIDRangeFirst + 1
+			varnishUID := service.UIDRangeFirst + 2
+
+			volumesPath := filepath.Join(servicePath, "volumes")
+			sharedPath := filepath.Join(volumesPath, "shared")
+			versionBasePath := filepath.Join(sharedPath, "service-versions")
+
+			for _, versionNumber := range orderedVersions {
+				version := service.ServiceVersions[versionNumber]
+				strVersion := strconv.FormatInt(version.Version, 10)
+				versionPath := filepath.Join(versionBasePath, strVersion)
+
+				fmt.Println(versionPath)
+
+				_, err := os.Stat(versionPath)
+				if err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						agt.logger.Info().Str("path", versionPath).Msg("creating directory path")
+						err := os.MkdirAll(versionPath, 0o700)
+						if err != nil {
+							agt.logger.Err(err).Str("path", versionPath).Msg("unable to create directory path")
+							return
+						}
+					} else {
+						agt.logger.Err(err).Msg("stat failed")
+						return
+					}
+				}
+
+				haproxyPath := filepath.Join(versionPath, "haproxy")
+				_, err = agt.buildConfFile(haproxyPath, "haproxy.cfg", int(haProxyUID), int(commonGID), version.HAProxyConfig)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to build HAProxy conf file")
+					return
+				}
+
+				varnishPath := filepath.Join(versionPath, "varnish")
+				_, err = agt.buildConfFile(varnishPath, "varnish.vcl", int(varnishUID), int(commonGID), version.VCL)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to build VCL conf file")
+					return
+				}
+
+				if version.Active {
+					err = agt.setActiveLink(versionBasePath, version.Version)
+					if err != nil {
+						agt.logger.Err(err).Msg("unable to set active link")
+						return
+					}
+				}
+			}
+
+			composeBasePath := filepath.Join(servicePath, "compose")
+			cachePath := filepath.Join(volumesPath, "cache")
+			certsPath := filepath.Join(volumesPath, "certs")
+			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
+
+			ccc := cacheComposeConfig{
+				VersionBaseDir:  versionBasePath,
+				CacheDir:        cachePath,
+				SharedDir:       sharedPath,
+				CertsDir:        certsPath,
+				CertsPrivateDir: certsPrivatePath,
+				HAProxyUID:      haProxyUID,
+				VarnishUID:      varnishUID,
+				GID:             commonGID,
+			}
+
+			cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, ccc)
+			if err != nil {
+				agt.logger.Fatal().Err(err).Msg("generating cache compose config failed")
+				return
+			}
+
+			composeFile, err := agt.buildConfFile(composeBasePath, "docker-compose.yml", 0, 0, cacheCompose)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to build compose file")
+				return
+
+			}
+
+			cssc := cacheSystemdServiceConfig{
+				ComposeFile: composeFile,
+				OrgID:       org.ID.String(),
+				OrgName:     org.Name,
+				ServiceID:   service.ID.String(),
+				ServiceName: service.Name,
+			}
+
+			_, err = generateCacheSystemdService(agt.templates.cacheService, cssc)
+			if err != nil {
+				agt.logger.Fatal().Err(err).Msg("generating cache systemd service failed")
+				return
+			}
+
+			_, err = agt.buildConfFile(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID), 0, 0, cacheCompose)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to build compose file")
+				return
+			}
 		}
 	}
-
-	baseName := fmt.Sprintf("sunet-cdn-agent_%s_%s.service", orgID, serviceID)
-
-	systemdServiceFilePath := filepath.Join(baseDir, baseName)
-
-	cacheSystemdService, err := generateCacheSystemdService(agt.templates.cacheService, cssc)
-	if err != nil {
-		agt.logger.Fatal().Err(err).Msg("generating cache systemd service failed")
-		return err
-	}
-
-	err = agt.createOrUpdateFile(systemdServiceFilePath, 0, 0, cacheSystemdService)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (agt *agent) loop(wg *sync.WaitGroup) {
@@ -470,135 +591,11 @@ mainLoop:
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to fetch cache node config")
 		} else {
-			dirPath := filepath.Join(agt.conf.ConfWriter.RootDir, "conf")
-
-			// Handle things ordered by UUID or version, to make operations
-			// carry out in a determinstic order which is easier to follow.
-			orderedOrgs := []string{}
-			for orgUUID := range cnc.Orgs {
-				orderedOrgs = append(orderedOrgs, orgUUID)
-			}
-			slices.Sort(orderedOrgs)
-
-			// Expected directory structure:
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/varnish.vcl
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/haproxy/haproxy.cfg
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/varnish.vcl
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/haproxy/haproxy.cfg
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/active -> 2
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/work
-			// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/compose/docker-compose.yml
-			//
-			// The reason for this specific layout is that we can
-			// mount the "shared" directory to all containers
-			// belonging to a given service and only change a
-			// single symlink (active) atomically and be sure that
-			// even in the event of a system crash/power outage all
-			// processes related to a given service will use config
-			// for the same version when they come up again after
-			// reboot.
-		fileLoop:
-			for _, orgUUID := range orderedOrgs {
-				org := cnc.Orgs[orgUUID]
-				orgPath := filepath.Join(dirPath, "orgs", org.ID.String())
-				fmt.Println(orgPath)
-
-				orderedServices := []string{}
-				for serviceUUID := range org.Services {
-					orderedServices = append(orderedServices, serviceUUID)
-				}
-				slices.Sort(orderedServices)
-
-				for _, serviceUUID := range orderedServices {
-					service := org.Services[serviceUUID]
-					servicePath := filepath.Join(orgPath, "services", service.ID.String())
-					fmt.Println(servicePath)
-
-					orderedVersions := []int64{}
-					for versionNumber := range service.ServiceVersions {
-						orderedVersions = append(orderedVersions, versionNumber)
-					}
-					slices.Sort(orderedVersions)
-
-					commonGID := service.UIDRangeFirst
-					haProxyUID := service.UIDRangeFirst + 1
-					varnishUID := service.UIDRangeFirst + 2
-
-					for _, versionNumber := range orderedVersions {
-						version := service.ServiceVersions[versionNumber]
-						strVersion := strconv.FormatInt(version.Version, 10)
-						versionBasePath := filepath.Join(servicePath, "volumes/shared/service-versions")
-						versionPath := filepath.Join(versionBasePath, strVersion)
-
-						fmt.Println(versionPath)
-
-						_, err := os.Stat(versionPath)
-						if err != nil {
-							if errors.Is(err, fs.ErrNotExist) {
-								agt.logger.Info().Str("path", versionPath).Msg("creating directory path")
-								err := os.MkdirAll(versionPath, 0o700)
-								if err != nil {
-									agt.logger.Err(err).Str("path", versionPath).Msg("unable to create directory path")
-									break fileLoop
-								}
-							} else {
-								agt.logger.Err(err).Msg("stat failed")
-								break fileLoop
-							}
-						}
-
-						err = agt.buildConfFile(versionPath, "haproxy", "haproxy.cfg", int(haProxyUID), int(commonGID), version.HAProxyConfig)
-						if err != nil {
-							agt.logger.Err(err).Msg("unable to build HAProxy conf file")
-							break fileLoop
-						}
-
-						err = agt.buildConfFile(versionPath, "varnish", "varnish.vcl", int(varnishUID), int(commonGID), version.VCL)
-						if err != nil {
-							agt.logger.Err(err).Msg("unable to build VCL conf file")
-							break fileLoop
-						}
-
-						if version.Active {
-							err = agt.setActiveLink(versionBasePath, version.Version)
-							if err != nil {
-								break fileLoop
-							}
-						}
-					}
-
-					ccc := cacheComposeConfig{
-						HAProxyUID: haProxyUID,
-						VarnishUID: varnishUID,
-						GID:        commonGID,
-					}
-
-					composeBasePath := filepath.Join(servicePath, "compose")
-					composeFile, err := agt.buildCacheCompose(composeBasePath, ccc)
-					if err != nil {
-						break fileLoop
-					}
-
-					cssc := cacheSystemdServiceConfig{
-						ComposeFile: composeFile,
-						OrgID:       org.ID.String(),
-						OrgName:     org.Name,
-						ServiceID:   service.ID.String(),
-						ServiceName: service.Name,
-					}
-
-					err = agt.buildCacheSystemdService(agt.conf.ConfWriter.SystemdDir, cssc, org.ID.String(), service.ID.String())
-					if err != nil {
-						agt.logger.Fatal().Err(err).Msg("generating service conf failed")
-					}
-				}
-			}
+			agt.generateFiles(cnc)
 		}
-
 		// Wait for the next time to run the loop, or exit if we are sutting down
 		select {
 		case <-time.Tick(time.Second * 10):
-			continue
 		case <-agt.ctx.Done():
 			break mainLoop
 		}
@@ -656,6 +653,11 @@ func Run(logger zerolog.Logger) error {
 	}
 
 	tmpls.cacheService, err = template.ParseFS(cacheServiceTemplateFS, "templates/systemd-service/default.template")
+	if err != nil {
+		return err
+	}
+
+	tmpls.slashSeccompFile, err = template.ParseFS(seccompTemplateFS, "templates/seccomp/varnish-slash-seccomp.json")
 	if err != nil {
 		return err
 	}

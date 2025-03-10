@@ -245,6 +245,7 @@ func (agt *agent) getCacheNodeConfig() (types.CacheNodeConfig, error) {
 }
 
 type cacheComposeConfig struct {
+	SeccompDir      string
 	VersionBaseDir  string
 	CacheDir        string
 	SharedDir       string
@@ -536,6 +537,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
 
 			ccc := cacheComposeConfig{
+				SeccompDir:      seccompDir,
 				VersionBaseDir:  versionBasePath,
 				CacheDir:        cachePath,
 				SharedDir:       sharedPath,

@@ -80,7 +80,7 @@ services:
     ]
     # Allow io_uring operations expected by slash fellow.
     security_opt:
-      - seccomp:/opt/sunet-cdn/conf/varnish-slash-seccomp.json
+      - seccomp:{{.SeccompDir}}/varnish-slash-seccomp.json
     # Fix error log: "varnish-1  | Info: Child (29) said fellow_io_uring_register_buffers: fellow_io_uring_register_buffers Cannot allocate memory (12)"
     ulimits:
       memlock: -1

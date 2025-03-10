@@ -57,9 +57,9 @@ var cacheServiceTemplateFS embed.FS
 // use a single instance of Validate, it caches struct info
 var validate = validator.New(validator.WithRequiredStructEnabled())
 
-func (agt *agent) replaceFile(filename string, uid int, gid int, content string) error {
+func (agt *agent) replaceFile(filename string, uid int, gid int, perm os.FileMode, content string) error {
 	tmpFilename := filename + ".tmp"
-	tmpFilenameFh, err := os.Create(filepath.Clean(tmpFilename))
+	tmpFilenameFh, err := os.OpenFile(filepath.Clean(tmpFilename), os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- gosec gets upset because perm is passed in as a variable which seems strange, see https://github.com/securego/gosec/issues/1318
 	if err != nil {
 		agt.logger.Err(err).Str("path", tmpFilename).Msg("unable to create file")
 		return err
@@ -132,12 +132,12 @@ func (agt *agent) replaceFile(filename string, uid int, gid int, content string)
 	return nil
 }
 
-func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, content string) error {
+func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, perm os.FileMode, content string) error {
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			agt.logger.Info().Str("path", filename).Msg("creating file")
-			err = agt.replaceFile(filename, uid, gid, content)
+			err = agt.replaceFile(filename, uid, gid, perm, content)
 			if err != nil {
 				return err
 			}
@@ -148,6 +148,12 @@ func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, content 
 	} else {
 		// The file exists, fix uid/gid if needed
 		err = agt.chownIfNeeded(filename, fileInfo, uid, gid)
+		if err != nil {
+			return err
+		}
+
+		// fix perm if different
+		err = agt.chmodIfNeeded(filename, fileInfo, perm)
 		if err != nil {
 			return err
 		}
@@ -163,7 +169,7 @@ func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, content 
 
 		if fileSum != contentSum {
 			agt.logger.Info().Str("file_sha256", fileSum).Str("content_sha256", contentSum).Str("path", filename).Msg("file content has changed, replacing file")
-			err = agt.replaceFile(filename, uid, gid, content)
+			err = agt.replaceFile(filename, uid, gid, perm, content)
 			if err != nil {
 				return err
 			}
@@ -473,13 +479,13 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	}
 
 	filePath := filepath.Join(seccompDir, "varnish-slash-seccomp.json")
-	err = agt.createOrUpdateFile(filePath, 0, 0, slashSeccompContent)
+	err = agt.createOrUpdateFile(filePath, 0, 0, 0o600, slashSeccompContent)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
 		return
 	}
 
-	err = agt.createOrUpdateFile(filePath, 0, 0, slashSeccompContent)
+	err = agt.createOrUpdateFile(filePath, 0, 0, 0o600, slashSeccompContent)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
 		return
@@ -595,7 +601,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 
 				haProxyConfFile := filepath.Join(haproxyPath, "haproxy.cfg")
-				err = agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), version.HAProxyConfig)
+				err = agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), 0o600, version.HAProxyConfig)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build HAProxy conf file")
 					return
@@ -609,7 +615,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 
 				varnishVCLFile := filepath.Join(varnishPath, "varnish.vcl")
-				err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, version.VCL)
+				err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")
 					return
@@ -664,7 +670,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 
 			composeFile := filepath.Join(composeBasePath, "docker-compose.yml")
-			err = agt.createOrUpdateFile(composeFile, 0, 0, cacheCompose)
+			err = agt.createOrUpdateFile(composeFile, 0, 0, 0o600, cacheCompose)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to build compose file")
 				return
@@ -686,7 +692,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 
 			systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
-			err = agt.createOrUpdateFile(systemdFile, 0, 0, cacheService)
+			err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o600, cacheService)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to build compose file")
 				return

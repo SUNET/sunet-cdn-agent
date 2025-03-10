@@ -147,37 +147,9 @@ func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, content 
 		}
 	} else {
 		// The file exists, fix uid/gid if needed
-		if s, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
-			chownNeeded := false
-
-			if uid < 0 || uid > math.MaxUint32 {
-				agt.logger.Info().Str("path", filename).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("new UID does not fit in uint32")
-				return fmt.Errorf("uid %d does not fit in uint32", uid)
-			}
-			if s.Uid != uint32(uid) {
-				agt.logger.Info().Str("path", filename).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("updating file UID")
-				chownNeeded = true
-			}
-
-			if gid < 0 || gid > math.MaxUint32 {
-				agt.logger.Info().Str("path", filename).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("new GID does not fit in uint32")
-				return fmt.Errorf("gid %d does not fit in uint32", uid)
-			}
-			if s.Gid != uint32(gid) {
-				agt.logger.Info().Str("path", filename).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("updating file GID")
-				chownNeeded = true
-			}
-
-			if chownNeeded {
-				err = os.Chown(filename, uid, gid)
-				if err != nil {
-					agt.logger.Err(err).Str("path", filename).Uint32("old_uid", s.Uid).Int("new_uid", uid).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("chown failed")
-					return err
-				}
-			}
-		} else {
-			agt.logger.Error().Str("path", filename).Msg("unable to access Uid/Gid of filename, not running on linux?")
-			return errors.New("unable to access Uid/Gid")
+		err = agt.chownIfNeeded(filename, fileInfo, uid, gid)
+		if err != nil {
+			return err
 		}
 
 		// update content if it is different
@@ -390,32 +362,64 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
 	return nil
 }
 
-func (agt *agent) buildConfFile(dirName string, fileName string, uid int, gid int, content string) (string, error) {
-	err := agt.createDirPathIfNeeded(dirName)
-	if err != nil {
-		return "", err
-	}
+func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid int) error {
+	if s, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
+		chownNeeded := false
 
-	filePath := filepath.Join(dirName, fileName)
-	err = agt.createOrUpdateFile(filePath, uid, gid, content)
-	if err != nil {
-		return "", err
-	}
+		if uid < 0 || uid > math.MaxUint32 {
+			agt.logger.Info().Str("path", path).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("new UID does not fit in uint32")
+			return fmt.Errorf("uid %d does not fit in uint32", uid)
+		}
+		if s.Uid != uint32(uid) {
+			agt.logger.Info().Str("path", path).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("updating file UID")
+			chownNeeded = true
+		}
 
-	return filePath, nil
+		if gid < 0 || gid > math.MaxUint32 {
+			agt.logger.Info().Str("path", path).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("new GID does not fit in uint32")
+			return fmt.Errorf("gid %d does not fit in uint32", uid)
+		}
+		if s.Gid != uint32(gid) {
+			agt.logger.Info().Str("path", path).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("updating file GID")
+			chownNeeded = true
+		}
+
+		if chownNeeded {
+			err := os.Chown(path, uid, gid)
+			if err != nil {
+				agt.logger.Err(err).Str("path", path).Uint32("old_uid", s.Uid).Int("new_uid", uid).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("chown failed")
+				return err
+			}
+		}
+	} else {
+		agt.logger.Error().Str("path", path).Msg("unable to access Uid/Gid of file, not running on linux?")
+		return errors.New("unable to access Uid/Gid")
+	}
+	return nil
 }
 
-func (agt *agent) createDirPathIfNeeded(path string) error {
-	_, err := os.Stat(path)
+func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.FileMode) error {
+	fileInfo, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			agt.logger.Info().Str("path", path).Msg("creating directory path")
-			err := os.MkdirAll(path, 0o700)
+			err := os.Mkdir(path, perm)
 			if err != nil {
 				return fmt.Errorf("unable to create directory path: %w", err)
 			}
+
+			err = os.Chown(path, uid, gid)
+			if err != nil {
+				return fmt.Errorf("unable to call chown: %w", err)
+			}
 		} else {
 			return fmt.Errorf("stat failed: %w", err)
+		}
+	} else {
+		// Directory exists, make sure it has the correct uid/gid
+		err = agt.chownIfNeeded(path, fileInfo, uid, gid)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -423,6 +427,11 @@ func (agt *agent) createDirPathIfNeeded(path string) error {
 
 func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	confPath := filepath.Join(agt.conf.ConfWriter.RootDir, "conf")
+	err := agt.createDirPathIfNeeded(confPath, 0, 0, 0o700)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create conf dir")
+		return
+	}
 
 	// Handle things ordered by UUID or version, to make operations
 	// carry out in a determinstic order which is easier to follow.
@@ -439,7 +448,20 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	}
 
 	seccompDir := filepath.Join(confPath, "seccomp")
-	_, err = agt.buildConfFile(seccompDir, "varnish-slash-seccomp.json", 0, 0, slashSeccompContent)
+	err = agt.createDirPathIfNeeded(seccompDir, 0, 0, 0o700)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create seccomp dir")
+		return
+	}
+
+	filePath := filepath.Join(seccompDir, "varnish-slash-seccomp.json")
+	err = agt.createOrUpdateFile(filePath, 0, 0, slashSeccompContent)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create slash seccomp file")
+		return
+	}
+
+	err = agt.createOrUpdateFile(filePath, 0, 0, slashSeccompContent)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
 		return
@@ -464,7 +486,20 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	// reboot.
 	for _, orgUUID := range orderedOrgs {
 		org := cnc.Orgs[orgUUID]
-		orgPath := filepath.Join(confPath, "orgs", org.ID.String())
+
+		orgPath := filepath.Join(confPath, "orgs")
+		err = agt.createDirPathIfNeeded(orgPath, 0, 0, 0o700)
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to create orgs dir")
+			return
+		}
+
+		orgIDPath := filepath.Join(orgPath, org.ID.String())
+		err = agt.createDirPathIfNeeded(orgIDPath, 0, 0, 0o700)
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to create orgs ID dir")
+			return
+		}
 		fmt.Println(orgPath)
 
 		orderedServices := []string{}
@@ -475,7 +510,24 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 		for _, serviceUUID := range orderedServices {
 			service := org.Services[serviceUUID]
-			servicePath := filepath.Join(orgPath, "services", service.ID.String())
+
+			commonGID := service.UIDRangeFirst
+			haProxyUID := service.UIDRangeFirst + 1
+			varnishUID := service.UIDRangeFirst + 2
+
+			servicePath := filepath.Join(orgPath, "services")
+			err = agt.createDirPathIfNeeded(servicePath, 0, int(commonGID), 0o700)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create service dir")
+				return
+			}
+
+			serviceIDPath := filepath.Join(servicePath, service.ID.String())
+			err = agt.createDirPathIfNeeded(serviceIDPath, 0, int(commonGID), 0o750)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create service ID dir")
+				return
+			}
 			fmt.Println(servicePath)
 
 			orderedVersions := []int64{}
@@ -484,36 +536,62 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 			slices.Sort(orderedVersions)
 
-			commonGID := service.UIDRangeFirst
-			haProxyUID := service.UIDRangeFirst + 1
-			varnishUID := service.UIDRangeFirst + 2
-
 			volumesPath := filepath.Join(servicePath, "volumes")
+			err = agt.createDirPathIfNeeded(volumesPath, 0, int(commonGID), 0o750)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create volumes dir")
+				return
+			}
+
 			sharedPath := filepath.Join(volumesPath, "shared")
+			err = agt.createDirPathIfNeeded(sharedPath, 0, int(commonGID), 0o750)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create shared volume dir")
+				return
+			}
+
 			versionBasePath := filepath.Join(sharedPath, "service-versions")
+			err = agt.createDirPathIfNeeded(versionBasePath, 0, int(commonGID), 0o750)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create shared volume dir")
+				return
+			}
 
 			for _, versionNumber := range orderedVersions {
 				version := service.ServiceVersions[versionNumber]
 				strVersion := strconv.FormatInt(version.Version, 10)
+
 				versionPath := filepath.Join(versionBasePath, strVersion)
-
-				fmt.Println(versionPath)
-
-				err = agt.createDirPathIfNeeded(versionPath)
+				err = agt.createDirPathIfNeeded(versionPath, 0, int(commonGID), 0o750)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to create version path")
 					return
 				}
+				fmt.Println(versionPath)
 
 				haproxyPath := filepath.Join(versionPath, "haproxy")
-				_, err = agt.buildConfFile(haproxyPath, "haproxy.cfg", int(haProxyUID), int(commonGID), version.HAProxyConfig)
+				err = agt.createDirPathIfNeeded(haproxyPath, int(haProxyUID), 0, 0o700)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to create haproxy dir")
+					return
+				}
+
+				haProxyConfFile := filepath.Join(haproxyPath, "haproxy.cfg")
+				err = agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), version.HAProxyConfig)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build HAProxy conf file")
 					return
 				}
 
 				varnishPath := filepath.Join(versionPath, "varnish")
-				_, err = agt.buildConfFile(varnishPath, "varnish.vcl", int(varnishUID), int(commonGID), version.VCL)
+				err = agt.createDirPathIfNeeded(varnishPath, int(varnishUID), 0, 0o700)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to create varnish dir")
+					return
+				}
+
+				varnishVCLFile := filepath.Join(varnishPath, "varnish.vcl")
+				err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")
 					return
@@ -542,7 +620,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPrivatePath)
 
 			for _, dirToCreate := range dirsToCreateIfNeeded {
-				err = agt.createDirPathIfNeeded(dirToCreate)
+				err = agt.createDirPathIfNeeded(dirToCreate, 0, 0, 0o700)
 				if err != nil {
 					agt.logger.Err(err).Str("path", dirToCreate).Msg("unable to create dir")
 					return
@@ -567,7 +645,8 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				return
 			}
 
-			composeFile, err := agt.buildConfFile(composeBasePath, "docker-compose.yml", 0, 0, cacheCompose)
+			composeFile := filepath.Join(composeBasePath, "docker-compose.yml")
+			err = agt.createOrUpdateFile(composeFile, 0, 0, cacheCompose)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to build compose file")
 				return
@@ -582,13 +661,14 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				ServiceName: service.Name,
 			}
 
-			_, err = generateCacheSystemdService(agt.templates.cacheService, cssc)
+			cacheService, err := generateCacheSystemdService(agt.templates.cacheService, cssc)
 			if err != nil {
 				agt.logger.Fatal().Err(err).Msg("generating cache systemd service failed")
 				return
 			}
 
-			_, err = agt.buildConfFile(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID), 0, 0, cacheCompose)
+			systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
+			err = agt.createOrUpdateFile(systemdFile, 0, 0, cacheService)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to build compose file")
 				return

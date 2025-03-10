@@ -391,19 +391,9 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
 }
 
 func (agt *agent) buildConfFile(dirName string, fileName string, uid int, gid int, content string) (string, error) {
-	_, err := os.Stat(dirName)
+	err := agt.createDirPathIfNeeded(dirName)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			agt.logger.Info().Str("path", dirName).Msg("creating directory path")
-			err := os.MkdirAll(dirName, 0o700)
-			if err != nil {
-				agt.logger.Err(err).Str("path", dirName).Msg("unable to create directory")
-				return "", err
-			}
-		} else {
-			agt.logger.Err(err).Str("path", dirName).Msg("stat failed")
-			return "", err
-		}
+		return "", err
 	}
 
 	filePath := filepath.Join(dirName, fileName)
@@ -413,6 +403,22 @@ func (agt *agent) buildConfFile(dirName string, fileName string, uid int, gid in
 	}
 
 	return filePath, nil
+}
+
+func (agt *agent) createDirPathIfNeeded(path string) error {
+	_, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			agt.logger.Info().Str("path", path).Msg("creating directory path")
+			err := os.MkdirAll(path, 0o700)
+			if err != nil {
+				return fmt.Errorf("unable to create directory path: %w", err)
+			}
+		} else {
+			return fmt.Errorf("stat failed: %w", err)
+		}
+	}
+	return nil
 }
 
 func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
@@ -493,19 +499,10 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 				fmt.Println(versionPath)
 
-				_, err := os.Stat(versionPath)
+				err = agt.createDirPathIfNeeded(versionPath)
 				if err != nil {
-					if errors.Is(err, fs.ErrNotExist) {
-						agt.logger.Info().Str("path", versionPath).Msg("creating directory path")
-						err := os.MkdirAll(versionPath, 0o700)
-						if err != nil {
-							agt.logger.Err(err).Str("path", versionPath).Msg("unable to create directory path")
-							return
-						}
-					} else {
-						agt.logger.Err(err).Msg("stat failed")
-						return
-					}
+					agt.logger.Err(err).Msg("unable to create version path")
+					return
 				}
 
 				haproxyPath := filepath.Join(versionPath, "haproxy")
@@ -531,10 +528,26 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 			}
 
+			dirsToCreateIfNeeded := []string{}
+
 			composeBasePath := filepath.Join(servicePath, "compose")
+			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, composeBasePath)
+
 			cachePath := filepath.Join(volumesPath, "cache")
+			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, cachePath)
+
 			certsPath := filepath.Join(volumesPath, "certs")
+			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPath)
 			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
+			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPrivatePath)
+
+			for _, dirToCreate := range dirsToCreateIfNeeded {
+				err = agt.createDirPathIfNeeded(dirToCreate)
+				if err != nil {
+					agt.logger.Err(err).Str("path", dirToCreate).Msg("unable to create dir")
+					return
+				}
+			}
 
 			ccc := cacheComposeConfig{
 				SeccompDir:      seccompDir,

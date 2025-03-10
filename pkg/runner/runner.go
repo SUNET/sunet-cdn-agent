@@ -398,6 +398,18 @@ func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid 
 	return nil
 }
 
+func (agt *agent) chmodIfNeeded(path string, fileInfo os.FileInfo, perm os.FileMode) error {
+	if fileInfo.Mode().Perm() != perm {
+		agt.logger.Info().Str("path", path).Str("old_perm", fileInfo.Mode().Perm().String()).Str("new_perm", perm.String()).Msg("updating perm on file")
+		err := os.Chmod(path, perm)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.FileMode) error {
 	fileInfo, err := os.Stat(path)
 	if err != nil {
@@ -418,6 +430,12 @@ func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.F
 	} else {
 		// Directory exists, make sure it has the correct uid/gid
 		err = agt.chownIfNeeded(path, fileInfo, uid, gid)
+		if err != nil {
+			return err
+		}
+
+		// also check it has the correct perms
+		err = agt.chmodIfNeeded(path, fileInfo, perm)
 		if err != nil {
 			return err
 		}
@@ -544,7 +562,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 
 			sharedPath := filepath.Join(volumesPath, "shared")
-			err = agt.createDirPathIfNeeded(sharedPath, 0, int(commonGID), 0o750)
+			err = agt.createDirPathIfNeeded(sharedPath, 0, int(commonGID), 0o770)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create shared volume dir")
 				return

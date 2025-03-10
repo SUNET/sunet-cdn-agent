@@ -431,6 +431,17 @@ func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.F
 			if err != nil {
 				return fmt.Errorf("unable to call chown: %w", err)
 			}
+
+			// Mkdir() is affected by umask, so trying to set
+			// a perm of 0770 will still result in 0750 given a
+			// default umask of 0022. Make sure the dir has the
+			// expected perm here instead of updating it on the
+			// next iteration when the dir already exists.
+			err = os.Chmod(path, perm)
+			if err != nil {
+				return fmt.Errorf("unable to call chmod: %w", err)
+			}
+
 		} else {
 			return fmt.Errorf("stat failed: %w", err)
 		}

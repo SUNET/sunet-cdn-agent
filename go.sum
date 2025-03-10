@@ -6,6 +6,8 @@ github.com/SUNET/sunet-cdn-manager v0.0.0-20250308074011-d5c38a40b86a h1:wcv4ahN
 github.com/SUNET/sunet-cdn-manager v0.0.0-20250308074011-d5c38a40b86a/go.mod h1:cesFnQSOQKk7lGWC87bFmqBb6CDkLKuXuU7iBcnhCRg=
 github.com/SUNET/sunet-cdn-manager v0.0.0-20250309144312-6adaa952fb82 h1:vdSXn6U4NoZg+q2x8GMdtHxJMkzglClXuuYaWN19tJ4=
 github.com/SUNET/sunet-cdn-manager v0.0.0-20250309144312-6adaa952fb82/go.mod h1:cesFnQSOQKk7lGWC87bFmqBb6CDkLKuXuU7iBcnhCRg=
+github.com/SUNET/sunet-cdn-manager v0.0.0-20250310133326-7b91588a5eb9 h1:rNVJ8YvC8f26186MA3BYcnyWmpu18pGH330jopoexDY=
+github.com/SUNET/sunet-cdn-manager v0.0.0-20250310133326-7b91588a5eb9/go.mod h1:cesFnQSOQKk7lGWC87bFmqBb6CDkLKuXuU7iBcnhCRg=
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/danielgtaylor/huma/v2 v2.30.0 h1:pdqr3aBmoZ7vbtkr5+yiqUBvB0s6VglGMwZXeedkwZw=

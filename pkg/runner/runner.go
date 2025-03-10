@@ -43,6 +43,7 @@ type managerSettings struct {
 type confWriterSettings struct {
 	RootDir    string `mapstructure:"root_dir" validate:"required"`
 	SystemdDir string `mapstructure:"systemd_dir" validate:"required"`
+	CertDir    string `mapstructure:"cert_dir" validate:"required"`
 }
 
 //go:embed templates/compose/default.template
@@ -449,6 +450,50 @@ func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.F
 	return nil
 }
 
+func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
+	for _, versionNumber := range orderedVersions {
+		version := service.ServiceVersions[versionNumber]
+
+		// Skip service if it requires TLS (has at
+		// least one origin with TLS enabled) and we do
+		// not have a certificate for the domain name(s)
+		// assigned to the version.
+		if version.TLS {
+			for _, domain := range version.Domains {
+				domainDir := filepath.Join(agt.conf.ConfWriter.CertDir, string(domain))
+				_, err := os.Stat(domainDir)
+				if err != nil {
+					agt.logger.Error().Str("path", domainDir).Msg("no cert dir available for domain, skipping service")
+					return err
+				}
+				// Created combined cert file as required by haproxy
+				fullChainPath := filepath.Join(domainDir, "fullchain.pem")
+				fullChainData, err := os.ReadFile(filepath.Clean(fullChainPath))
+				if err != nil {
+					agt.logger.Error().Str("path", fullChainPath).Msg("unable to read full chain cert file")
+					return err
+				}
+
+				privKeyPath := filepath.Join(domainDir, "privkey.pem")
+				privKeyData, err := os.ReadFile(filepath.Clean(privKeyPath))
+				if err != nil {
+					agt.logger.Error().Str("path", privKeyPath).Msg("unable to open private key for reading")
+					return err
+				}
+
+				haproxyCombinedFile := filepath.Join(certsPrivatePath, string(domain)+".pem")
+				tlsContent := string(fullChainData)
+				tlsContent += string(privKeyData)
+				err = agt.createOrUpdateFile(haproxyCombinedFile, int(haProxyUID), 0, 0o600, tlsContent)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	confPath := filepath.Join(agt.conf.ConfWriter.RootDir, "conf")
 	err := agt.createDirPathIfNeeded(confPath, 0, 0, 0o700)
@@ -532,6 +577,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 		}
 		slices.Sort(orderedServices)
 
+	serviceLoop:
 		for _, serviceUUID := range orderedServices {
 			service := org.Services[serviceUUID]
 
@@ -579,6 +625,26 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create shared volume dir")
 				return
+			}
+
+			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
+			err = agt.createDirPathIfNeeded(certsPrivatePath, int(haProxyUID), 0, 0o700)
+			if err != nil {
+				agt.logger.Err(err).Str("path", certsPrivatePath).Msg("unable to create certs-private dir")
+				return
+			}
+
+			// Do initial loop over all versions to figure out if
+			// TLS is required for any service version origin. If
+			// this is the case we need to make sure we have access
+			// to the required certs prior to potentiallly updating
+			// the "active" link. Otherwise we can end up in a
+			// situation where the active link points to a version
+			// of the config with references to TLS files that are
+			// not present, making things fail to start.
+			err := agt.addCertsToService(service, orderedVersions, certsPrivatePath, haProxyUID)
+			if err != nil {
+				continue serviceLoop
 			}
 
 			for _, versionNumber := range orderedVersions {
@@ -640,8 +706,6 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 			certsPath := filepath.Join(volumesPath, "certs")
 			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPath)
-			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
-			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPrivatePath)
 
 			for _, dirToCreate := range dirsToCreateIfNeeded {
 				err = agt.createDirPathIfNeeded(dirToCreate, 0, 0, 0o700)

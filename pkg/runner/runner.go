@@ -515,7 +515,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			haProxyUID := service.UIDRangeFirst + 1
 			varnishUID := service.UIDRangeFirst + 2
 
-			servicePath := filepath.Join(orgPath, "services")
+			servicePath := filepath.Join(orgIDPath, "services")
 			err = agt.createDirPathIfNeeded(servicePath, 0, int(commonGID), 0o700)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create service dir")
@@ -536,7 +536,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 			slices.Sort(orderedVersions)
 
-			volumesPath := filepath.Join(servicePath, "volumes")
+			volumesPath := filepath.Join(serviceIDPath, "volumes")
 			err = agt.createDirPathIfNeeded(volumesPath, 0, int(commonGID), 0o750)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create volumes dir")

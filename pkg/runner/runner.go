@@ -652,6 +652,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				continue serviceLoop
 			}
 
+			serviceIsActive := false
 			for _, versionNumber := range orderedVersions {
 				version := service.ServiceVersions[versionNumber]
 				strVersion := strconv.FormatInt(version.Version, 10)
@@ -698,6 +699,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 						agt.logger.Err(err).Msg("unable to set active link")
 						return
 					}
+					serviceIsActive = true
 				}
 			}
 
@@ -746,25 +748,28 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 			}
 
-			cssc := cacheSystemdServiceConfig{
-				ComposeFile: composeFile,
-				OrgID:       org.ID.String(),
-				OrgName:     org.Name,
-				ServiceID:   service.ID.String(),
-				ServiceName: service.Name,
-			}
+			// Only create systemd files if the service has an active version
+			if serviceIsActive {
+				cssc := cacheSystemdServiceConfig{
+					ComposeFile: composeFile,
+					OrgID:       org.ID.String(),
+					OrgName:     org.Name,
+					ServiceID:   service.ID.String(),
+					ServiceName: service.Name,
+				}
 
-			cacheService, err := generateCacheSystemdService(agt.templates.cacheService, cssc)
-			if err != nil {
-				agt.logger.Fatal().Err(err).Msg("generating cache systemd service failed")
-				return
-			}
+				cacheService, err := generateCacheSystemdService(agt.templates.cacheService, cssc)
+				if err != nil {
+					agt.logger.Fatal().Err(err).Msg("generating cache systemd service failed")
+					return
+				}
 
-			systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
-			err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o600, cacheService)
-			if err != nil {
-				agt.logger.Err(err).Msg("unable to build compose file")
-				return
+				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
+				err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o600, cacheService)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to build compose file")
+					return
+				}
 			}
 		}
 	}

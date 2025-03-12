@@ -861,11 +861,11 @@ func Run(logger zerolog.Logger) error {
 		return err
 	}
 
-	a := newAgent(ctx, logger, c, tmpls, conf)
+	agt := newAgent(ctx, logger, c, tmpls, conf)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go a.loop(&wg)
+	go agt.loop(&wg)
 	wg.Wait()
 
 	return nil

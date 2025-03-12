@@ -534,14 +534,8 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 		return
 	}
 
-	filePath := filepath.Join(seccompDir, "varnish-slash-seccomp.json")
-	err = agt.createOrUpdateFile(filePath, 0, 0, 0o600, slashSeccompContent)
-	if err != nil {
-		agt.logger.Err(err).Msg("unable to create slash seccomp file")
-		return
-	}
-
-	err = agt.createOrUpdateFile(filePath, 0, 0, 0o600, slashSeccompContent)
+	seccompFile := filepath.Join(seccompDir, "varnish-slash-seccomp.json")
+	err = agt.createOrUpdateFile(seccompFile, 0, 0, 0o600, slashSeccompContent)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
 		return

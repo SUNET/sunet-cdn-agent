@@ -3,7 +3,7 @@ module github.com/SUNET/sunet-cdn-agent
 go 1.24.0
 
 require (
-	github.com/SUNET/sunet-cdn-manager v0.0.0-20250310133326-7b91588a5eb9
+	github.com/SUNET/sunet-cdn-manager v0.0.0-20250312213919-29dad1021280
 	github.com/go-playground/validator/v10 v10.25.0
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/cobra v1.9.1
@@ -11,7 +11,7 @@ require (
 )
 
 require (
-	github.com/danielgtaylor/huma/v2 v2.30.0 // indirect
+	github.com/danielgtaylor/huma/v2 v2.31.0 // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect

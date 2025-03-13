@@ -8,10 +8,14 @@ github.com/SUNET/sunet-cdn-manager v0.0.0-20250309144312-6adaa952fb82 h1:vdSXn6U
 github.com/SUNET/sunet-cdn-manager v0.0.0-20250309144312-6adaa952fb82/go.mod h1:cesFnQSOQKk7lGWC87bFmqBb6CDkLKuXuU7iBcnhCRg=
 github.com/SUNET/sunet-cdn-manager v0.0.0-20250310133326-7b91588a5eb9 h1:rNVJ8YvC8f26186MA3BYcnyWmpu18pGH330jopoexDY=
 github.com/SUNET/sunet-cdn-manager v0.0.0-20250310133326-7b91588a5eb9/go.mod h1:cesFnQSOQKk7lGWC87bFmqBb6CDkLKuXuU7iBcnhCRg=
+github.com/SUNET/sunet-cdn-manager v0.0.0-20250312213919-29dad1021280 h1:cmGhv3dSaPaZSLZiyV0YD61Sx5jWWE6gYzQdxGfB4EM=
+github.com/SUNET/sunet-cdn-manager v0.0.0-20250312213919-29dad1021280/go.mod h1:PREM5ZYkWJdNK8V/I++hPEASN/mXHxOX2mqBl7n9GjA=
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/danielgtaylor/huma/v2 v2.30.0 h1:pdqr3aBmoZ7vbtkr5+yiqUBvB0s6VglGMwZXeedkwZw=
 github.com/danielgtaylor/huma/v2 v2.30.0/go.mod h1:9BxJwkeoPPDEJ2Bg4yPwL1mM1rYpAwCAWFKoo723spk=
+github.com/danielgtaylor/huma/v2 v2.31.0 h1:17TGWnCiibRNvTb6KFp4xuWUqYb4GWtQLL4QMEj8LRQ=
+github.com/danielgtaylor/huma/v2 v2.31.0/go.mod h1:9BxJwkeoPPDEJ2Bg4yPwL1mM1rYpAwCAWFKoo723spk=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

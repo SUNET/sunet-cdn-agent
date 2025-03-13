@@ -1,0 +1,12 @@
+[Match]
+Name=dummy0
+
+[Network]
+{{- range $orgIPContainer := $}}
+{{- range $serviceIPContainer := $orgIPContainer.ServiceIPContainers}}
+# {{$orgIPContainer.Name}} - {{$serviceIPContainer.Name}}
+{{- range $address := $serviceIPContainer.IPAddresses}}
+Address={{$address}}/{{$address.BitLen}}
+{{- end}}
+{{- end}}
+{{- end}}

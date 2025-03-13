@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -41,9 +42,10 @@ type managerSettings struct {
 }
 
 type confWriterSettings struct {
-	RootDir    string `mapstructure:"root_dir" validate:"required"`
-	SystemdDir string `mapstructure:"systemd_dir" validate:"required"`
-	CertDir    string `mapstructure:"cert_dir" validate:"required"`
+	RootDir           string `mapstructure:"root_dir" validate:"required"`
+	SystemdSystemDir  string `mapstructure:"systemd_system_dir" validate:"required"`
+	SystemdNetworkDir string `mapstructure:"systemd_network_dir" validate:"required"`
+	CertDir           string `mapstructure:"cert_dir" validate:"required"`
 }
 
 //go:embed templates/compose/default.template
@@ -54,6 +56,9 @@ var seccompTemplateFS embed.FS
 
 //go:embed templates/systemd-service/default.template
 var cacheServiceTemplateFS embed.FS
+
+//go:embed templates/systemd-networkd/dummy.network
+var systemdDummyNetworkTemplateFS embed.FS
 
 // use a single instance of Validate, it caches struct info
 var validate = validator.New(validator.WithRequiredStructEnabled())
@@ -243,6 +248,17 @@ type cacheSystemdServiceConfig struct {
 	ServiceName string
 }
 
+func generateDummyNetworkConf(tmpl *template.Template, orgIPContainers []orgIPContainer) (string, error) {
+	var b strings.Builder
+
+	err := tmpl.Execute(&b, orgIPContainers)
+	if err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
+}
+
 func generateSeccomp(tmpl *template.Template) (string, error) {
 	var b strings.Builder
 
@@ -277,9 +293,10 @@ func generateCacheSystemdService(tmpl *template.Template, cssc cacheSystemdServi
 }
 
 type templates struct {
-	cacheCompose     *template.Template
-	cacheService     *template.Template
-	slashSeccompFile *template.Template
+	cacheCompose        *template.Template
+	cacheService        *template.Template
+	slashSeccompFile    *template.Template
+	systemdDummyNetwork *template.Template
 }
 
 type agent struct {
@@ -461,6 +478,37 @@ func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.F
 	return nil
 }
 
+func (agt *agent) collectIPAddresses(orgs map[string]types.OrgWithServices, orderedOrgs []string) []orgIPContainer {
+	allIPAddrs := []orgIPContainer{}
+	for _, orgUUID := range orderedOrgs {
+		org := orgs[orgUUID]
+
+		orgIPCont := orgIPContainer{
+			Name: org.Name,
+		}
+
+		orderedServices := []string{}
+		for serviceUUID := range org.Services {
+			orderedServices = append(orderedServices, serviceUUID)
+		}
+
+		slices.Sort(orderedServices)
+
+		for _, serviceUUID := range orderedServices {
+			service := org.Services[serviceUUID]
+			orgIPCont.ServiceIPContainers = append(
+				orgIPCont.ServiceIPContainers,
+				serviceIPContainer{
+					Name:        service.Name,
+					IPAddresses: service.IPAddresses,
+				})
+		}
+
+		allIPAddrs = append(allIPAddrs, orgIPCont)
+	}
+	return allIPAddrs
+}
+
 func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
 	for _, versionNumber := range orderedVersions {
 		version := service.ServiceVersions[versionNumber]
@@ -505,6 +553,16 @@ func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVe
 	return nil
 }
 
+type orgIPContainer struct {
+	Name                string
+	ServiceIPContainers []serviceIPContainer
+}
+
+type serviceIPContainer struct {
+	Name        string
+	IPAddresses []netip.Addr
+}
+
 func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	confPath := filepath.Join(agt.conf.ConfWriter.RootDir, "conf")
 	err := agt.createDirPathIfNeeded(confPath, 0, 0, 0o700)
@@ -539,6 +597,25 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
 		return
+	}
+
+	allIPAddresses := agt.collectIPAddresses(cnc.Orgs, orderedOrgs)
+
+	if len(allIPAddresses) > 0 {
+		dummyNetworkContent, err := generateDummyNetworkConf(agt.templates.systemdDummyNetwork, allIPAddresses)
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to generate systemd network config content")
+			return
+		}
+
+		fmt.Println(dummyNetworkContent)
+
+		networkFile := filepath.Join(agt.conf.ConfWriter.SystemdNetworkDir, "10-sunet-cdn-agent-dummy.network")
+		err = agt.createOrUpdateFile(networkFile, 0, 0, 0o644, dummyNetworkContent)
+		if err != nil {
+			agt.logger.Err(err).Str("path", networkFile).Msg("unable to create network file")
+			return
+		}
 	}
 
 	// Expected directory structure:
@@ -764,8 +841,8 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 					return
 				}
 
-				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
-				err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o600, cacheService)
+				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
+				err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build compose file")
 					return
@@ -829,9 +906,14 @@ func Run(logger zerolog.Logger) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	_, err = os.Stat(conf.ConfWriter.SystemdDir)
+	_, err = os.Stat(conf.ConfWriter.SystemdSystemDir)
 	if err != nil {
-		return fmt.Errorf("unable to find SystemD path '%s', this is required for the agent to work", conf.ConfWriter.SystemdDir)
+		return fmt.Errorf("unable to find SystemD system path '%s', this is required for the agent to work", conf.ConfWriter.SystemdSystemDir)
+	}
+
+	_, err = os.Stat(conf.ConfWriter.SystemdNetworkDir)
+	if err != nil {
+		return fmt.Errorf("unable to find SystemD network path '%s', this is required for the agent to work", conf.ConfWriter.SystemdSystemDir)
 	}
 
 	c := &http.Client{
@@ -851,6 +933,11 @@ func Run(logger zerolog.Logger) error {
 	}
 
 	tmpls.slashSeccompFile, err = template.ParseFS(seccompTemplateFS, "templates/seccomp/varnish-slash-seccomp.json")
+	if err != nil {
+		return err
+	}
+
+	tmpls.systemdDummyNetwork, err = template.ParseFS(systemdDummyNetworkTemplateFS, "templates/systemd-networkd/dummy.network")
 	if err != nil {
 		return err
 	}

@@ -5,5 +5,6 @@ url = "http://localhost:8081"
 
 [confwriter]
 root_dir = "/tmp/sunet-cdn-agent"
-systemd_dir = "/etc/systemd/system"
 cert_dir = "/etc/letsencrypt/live"
+systemd_system_dir = "/etc/systemd/system"
+systemd_network_dir = "/etc/systemd/network"

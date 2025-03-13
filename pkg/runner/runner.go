@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -138,37 +139,39 @@ func (agt *agent) replaceFile(filename string, uid int, gid int, perm os.FileMod
 	return nil
 }
 
-func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, perm os.FileMode, content string) error {
+func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, perm os.FileMode, content string) (bool, error) {
+	modified := false
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			agt.logger.Info().Str("path", filename).Msg("creating file")
 			err = agt.replaceFile(filename, uid, gid, perm, content)
 			if err != nil {
-				return err
+				return false, err
 			}
+			modified = true
 		} else {
 			agt.logger.Err(err).Str("path", filename).Msg("stat failed unexpectedly")
-			return err
+			return false, err
 		}
 	} else {
 		// The file exists, fix uid/gid if needed
 		err = agt.chownIfNeeded(filename, fileInfo, uid, gid)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		// fix perm if different
 		err = agt.chmodIfNeeded(filename, fileInfo, perm)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		// update content if it is different
 		fileSum, err := sha256SumFile(filename)
 		if err != nil {
 			agt.logger.Err(err).Str("path", filename).Msg("unable to get sha256 sum for existing file")
-			return err
+			return false, err
 		}
 
 		contentSum := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
@@ -177,12 +180,13 @@ func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, perm os.
 			agt.logger.Info().Str("file_sha256", fileSum).Str("content_sha256", contentSum).Str("path", filename).Msg("file content has changed, replacing file")
 			err = agt.replaceFile(filename, uid, gid, perm, content)
 			if err != nil {
-				return err
+				return false, err
 			}
+			modified = true
 		}
 	}
 
-	return nil
+	return modified, nil
 }
 
 func (agt *agent) getCacheNodeConfig() (types.CacheNodeConfig, error) {
@@ -543,7 +547,7 @@ func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVe
 				haproxyCombinedFile := filepath.Join(certsPrivatePath, string(domain)+".pem")
 				tlsContent := string(fullChainData)
 				tlsContent += string(privKeyData)
-				err = agt.createOrUpdateFile(haproxyCombinedFile, int(haProxyUID), 0, 0o600, tlsContent)
+				_, err = agt.createOrUpdateFile(haproxyCombinedFile, int(haProxyUID), 0, 0o600, tlsContent)
 				if err != nil {
 					return err
 				}
@@ -593,14 +597,13 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	}
 
 	seccompFile := filepath.Join(seccompDir, "varnish-slash-seccomp.json")
-	err = agt.createOrUpdateFile(seccompFile, 0, 0, 0o600, slashSeccompContent)
+	_, err = agt.createOrUpdateFile(seccompFile, 0, 0, 0o600, slashSeccompContent)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
 		return
 	}
 
 	allIPAddresses := agt.collectIPAddresses(cnc.Orgs, orderedOrgs)
-
 	if len(allIPAddresses) > 0 {
 		dummyNetworkContent, err := generateDummyNetworkConf(agt.templates.systemdDummyNetwork, allIPAddresses)
 		if err != nil {
@@ -608,13 +611,25 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			return
 		}
 
-		fmt.Println(dummyNetworkContent)
-
 		networkFile := filepath.Join(agt.conf.ConfWriter.SystemdNetworkDir, "10-sunet-cdn-agent-dummy.network")
-		err = agt.createOrUpdateFile(networkFile, 0, 0, 0o644, dummyNetworkContent)
+		modified, err := agt.createOrUpdateFile(networkFile, 0, 0, 0o644, dummyNetworkContent)
 		if err != nil {
 			agt.logger.Err(err).Str("path", networkFile).Msg("unable to create network file")
 			return
+		}
+
+		if modified {
+			agt.logger.Info().Msg("calling networkctl reload")
+			cmd := exec.Command("networkctl", "reload")
+			var stdOut strings.Builder
+			var stdErr strings.Builder
+			cmd.Stdout = &stdOut
+			cmd.Stderr = &stdErr
+			err := cmd.Run()
+			if err != nil {
+				agt.logger.Err(err).Str("stdout", stdOut.String()).Str("stderr", stdErr.String()).Msg("networkctl reload failed")
+				return
+			}
 		}
 	}
 
@@ -750,7 +765,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 
 				haProxyConfFile := filepath.Join(haproxyPath, "haproxy.cfg")
-				err = agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), 0o600, version.HAProxyConfig)
+				_, err = agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), 0o600, version.HAProxyConfig)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build HAProxy conf file")
 					return
@@ -764,7 +779,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 
 				varnishVCLFile := filepath.Join(varnishPath, "varnish.vcl")
-				err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
+				_, err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")
 					return
@@ -818,7 +833,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 
 			composeFile := filepath.Join(composeBasePath, "docker-compose.yml")
-			err = agt.createOrUpdateFile(composeFile, 0, 0, 0o600, cacheCompose)
+			_, err = agt.createOrUpdateFile(composeFile, 0, 0, 0o600, cacheCompose)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to build compose file")
 				return
@@ -842,7 +857,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 
 				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
-				err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
+				_, err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build compose file")
 					return

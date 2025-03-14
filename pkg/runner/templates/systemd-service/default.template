@@ -22,7 +22,7 @@ WorkingDirectory=/
 # To make docker pull work with basic-auth credentials
 Environment="HOME=/root"
 
-ExecStart=/usr/bin/docker compose -f {{.ComposeFile}} up --force-recreate --no-deps
+ExecStart=/usr/bin/docker compose --project-name sunet-cdn-agent-cache-{{.OrgName}}-{{.ServiceName}} -f {{.ComposeFile}} up --force-recreate --no-deps
 
 ExecStop=/usr/bin/docker compose -f {{.ComposeFile}} down
 

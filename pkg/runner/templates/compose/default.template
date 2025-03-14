@@ -48,7 +48,8 @@ services:
     # "fellow" storage backend to be able to persist cached content to disk, so
     # it is retained in case of a restart of the container or machine.
     image: "platform.sunet.se/sunet-cdn/cdn-varnish:af7f7d11e61acf9f6113811615d1baa46daf3bd1"
-    # Use the same custom user as is used for haproxy.
+    # Varnish uses a different UID but the same group ID as is used for haproxy
+    # so they can share some files like unix sockets.
     user: {{.VarnishUID}}:{{.GID}}
     volumes:
       - {{.VersionBaseDir}}:/service-versions:ro

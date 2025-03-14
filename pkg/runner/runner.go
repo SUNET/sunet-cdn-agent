@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -603,6 +604,8 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 		return
 	}
 
+	// Update IP addresses assigned to dummy interface if needed so haproxy
+	// can listen to them
 	allIPAddresses := agt.collectIPAddresses(cnc.Orgs, orderedOrgs)
 	if len(allIPAddresses) > 0 {
 		dummyNetworkContent, err := generateDummyNetworkConf(agt.templates.systemdDummyNetwork, allIPAddresses)
@@ -620,18 +623,15 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 		if modified {
 			agt.logger.Info().Msg("calling networkctl reload")
-			cmd := exec.Command("networkctl", "reload")
-			var stdOut strings.Builder
-			var stdErr strings.Builder
-			cmd.Stdout = &stdOut
-			cmd.Stderr = &stdErr
-			err := cmd.Run()
+			stdOut, stdErr, err := runCommand("networkctl", "reload")
 			if err != nil {
-				agt.logger.Err(err).Str("stdout", stdOut.String()).Str("stderr", stdErr.String()).Msg("networkctl reload failed")
+				agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("networkctl reload failed")
 				return
 			}
 		}
 	}
+
+	modifiedSystemdServices := []string{}
 
 	// Expected directory structure:
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/varnish.vcl
@@ -860,12 +860,33 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 					return
 				}
 
-				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID))
-				_, err = agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
+				systemdBaseName := fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID)
+				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, systemdBaseName)
+				modified, err := agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build compose file")
 					return
 				}
+
+				if modified {
+					modifiedSystemdServices = append(modifiedSystemdServices, systemdBaseName)
+				}
+			}
+		}
+	}
+
+	if len(modifiedSystemdServices) > 0 {
+		agt.logger.Info().Msg("calling systemctl deamon-reload")
+		stdOut, stdErr, err := runCommand("systemctl", "daemon-reload")
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl deamon-reload failed")
+			return
+		}
+
+		for _, systemdBaseName := range modifiedSystemdServices {
+			_, err = agt.enableUnitFile(systemdBaseName)
+			if err != nil {
+				return
 			}
 		}
 	}
@@ -899,6 +920,93 @@ func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls 
 		templates:  tmpls,
 		conf:       conf,
 	}
+}
+
+func runCommand(name string, arg ...string) (string, string, error) {
+	cmd := exec.Command(name, arg...)
+	var stdOut strings.Builder
+	var stdErr strings.Builder
+	cmd.Stdout = &stdOut
+	cmd.Stderr = &stdErr
+	err := cmd.Run()
+
+	return stdOut.String(), stdErr.String(), err
+}
+
+func (agt *agent) enableUnitFile(name string) (bool, error) {
+	modified := false
+
+	unitSettings := map[string]string{}
+	// UnitFileState=disabled
+	stdOut, stdErr, err := runCommand("systemctl", "show", name)
+	if err != nil {
+		agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl show failed")
+		return false, err
+	}
+
+	// Settings look like this, one per line:
+	// UnitFileState=disabled
+	scanner := bufio.NewScanner(strings.NewReader(stdOut))
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "=", 2)
+		if len(parts) != 2 {
+			return false, fmt.Errorf("expected two parts, got %d: %s", len(parts), parts)
+		}
+		unitSettings[parts[0]] = parts[1]
+	}
+	if err := scanner.Err(); err != nil {
+		agt.logger.Err(err).Msgf("reading output from 'systemctl show %s", name)
+	}
+
+	unitFileStateKey := "UnitFileState"
+	unitFileState, ok := unitSettings[unitFileStateKey]
+	if !ok {
+		agt.logger.Error().Str("setting_key", unitFileStateKey).Msg("unable to locate unit setting")
+		return false, fmt.Errorf("unable to locate unit setting")
+	}
+
+	if unitFileState == "disabled" {
+		agt.logger.Info().Str("service_name", name).Msg("enabling systemd service")
+		stdOut, stdErr, err := runCommand("systemctl", "enable", name)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl enable failed")
+			return false, err
+		}
+
+		// We only try to start a service initially when it is enabled.
+		// For "keeping an existing service alive" lets leave that up
+		// to systemd instead of becoming a process monitor ourselves.
+
+		// ActiveState=active
+		// SubState=running
+		activeStateKey := "ActiveState"
+		subStateKey := "SubState"
+
+		activeState, ok := unitSettings[activeStateKey]
+		if !ok {
+			agt.logger.Error().Str("setting_key", activeStateKey).Msg("unable to locate unit setting")
+			return false, fmt.Errorf("unable to locate unit setting")
+		}
+
+		subState, ok := unitSettings[subStateKey]
+		if !ok {
+			agt.logger.Error().Str("setting_key", subStateKey).Msg("unable to locate unit setting")
+			return false, fmt.Errorf("unable to locate unit setting")
+		}
+
+		if activeState != "active" || subState != "running" {
+			agt.logger.Info().Str("service_name", name).Msg("starting systemd service")
+			stdOut, stdErr, err := runCommand("systemctl", "start", name)
+			if err != nil {
+				agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl start failed")
+				return false, err
+			}
+		}
+
+		modified = true
+	}
+
+	return modified, nil
 }
 
 func Run(logger zerolog.Logger) error {

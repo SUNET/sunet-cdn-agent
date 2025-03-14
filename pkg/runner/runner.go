@@ -795,13 +795,17 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 			}
 
+			cachePath := filepath.Join(volumesPath, "cache")
+			err = agt.createDirPathIfNeeded(cachePath, int(varnishUID), 0, 0o700)
+			if err != nil {
+				agt.logger.Err(err).Str("path", cachePath).Msg("unable to create dir")
+				return
+			}
+
 			dirsToCreateIfNeeded := []string{}
 
 			composeBasePath := filepath.Join(servicePath, "compose")
 			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, composeBasePath)
-
-			cachePath := filepath.Join(volumesPath, "cache")
-			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, cachePath)
 
 			certsPath := filepath.Join(volumesPath, "certs")
 			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPath)

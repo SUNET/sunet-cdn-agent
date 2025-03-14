@@ -70,7 +70,7 @@ services:
       "-E",
       "/usr/lib/varnish/vmods/libvmod_slash.so",
       "-a",
-      "/shared/varnish.sock,PROXY,mode=600",
+      "/shared/varnish.sock,PROXY,mode=660",
      "-f",
      "/service-versions/active/varnish/varnish.vcl",
      "-p",

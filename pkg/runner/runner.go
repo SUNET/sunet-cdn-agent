@@ -28,6 +28,7 @@ import (
 
 	"github.com/SUNET/sunet-cdn-manager/pkg/types"
 	"github.com/go-playground/validator/v10"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 )
@@ -248,9 +249,7 @@ type cacheComposeConfig struct {
 type cacheSystemdServiceConfig struct {
 	ComposeFile string
 	OrgID       string
-	OrgName     string
 	ServiceID   string
-	ServiceName string
 }
 
 func generateDummyNetworkConf(tmpl *template.Template, orgIPContainers []orgIPContainer) (string, error) {
@@ -489,7 +488,7 @@ func (agt *agent) collectIPAddresses(orgs map[string]types.OrgWithServices, orde
 		org := orgs[orgUUID]
 
 		orgIPCont := orgIPContainer{
-			Name: org.Name,
+			ID: org.ID,
 		}
 
 		orderedServices := []string{}
@@ -504,7 +503,7 @@ func (agt *agent) collectIPAddresses(orgs map[string]types.OrgWithServices, orde
 			orgIPCont.ServiceIPContainers = append(
 				orgIPCont.ServiceIPContainers,
 				serviceIPContainer{
-					Name:        service.Name,
+					ID:          service.ID,
 					IPAddresses: service.IPAddresses,
 				})
 		}
@@ -559,12 +558,12 @@ func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVe
 }
 
 type orgIPContainer struct {
-	Name                string
+	ID                  pgtype.UUID
 	ServiceIPContainers []serviceIPContainer
 }
 
 type serviceIPContainer struct {
-	Name        string
+	ID          pgtype.UUID
 	IPAddresses []netip.Addr
 }
 
@@ -849,9 +848,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				cssc := cacheSystemdServiceConfig{
 					ComposeFile: composeFile,
 					OrgID:       org.ID.String(),
-					OrgName:     org.Name,
 					ServiceID:   service.ID.String(),
-					ServiceName: service.Name,
 				}
 
 				cacheService, err := generateCacheSystemdService(agt.templates.cacheService, cssc)

@@ -4,7 +4,7 @@ Name=dummy0
 [Network]
 {{- range $orgIPContainer := $}}
 {{- range $serviceIPContainer := $orgIPContainer.ServiceIPContainers}}
-# {{$orgIPContainer.Name}} - {{$serviceIPContainer.Name}}
+# OrgID: {{$orgIPContainer.ID}}, ServiceID: {{$serviceIPContainer.ID}}
 {{- range $address := $serviceIPContainer.IPAddresses}}
 Address={{$address}}/{{$address.BitLen}}
 {{- end}}

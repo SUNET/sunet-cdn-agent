@@ -633,9 +633,9 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	modifiedSystemdServices := []string{}
 
 	// Expected directory structure:
-	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/varnish.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/default.vcl
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/haproxy/haproxy.cfg
-	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/varnish.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/default.vcl
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/haproxy/haproxy.cfg
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/active -> 2
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/work
@@ -777,7 +777,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 					return
 				}
 
-				varnishVCLFile := filepath.Join(varnishPath, "varnish.vcl")
+				varnishVCLFile := filepath.Join(varnishPath, "default.vcl")
 				_, err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")

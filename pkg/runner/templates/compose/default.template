@@ -75,7 +75,7 @@ services:
       "-a",
       "/shared/varnish.sock,PROXY,mode=660",
       "-f",
-      "/service-versions/active/varnish/varnish.vcl",
+      "/service-versions/active/varnish/default.vcl",
       "-p",
       "feature=+http2",
       "-s",

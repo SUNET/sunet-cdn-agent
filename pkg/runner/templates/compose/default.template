@@ -74,12 +74,12 @@ services:
       "/usr/lib/varnish/vmods/libvmod_slash.so",
       "-a",
       "/shared/varnish.sock,PROXY,mode=660",
-     "-f",
-     "/service-versions/active/varnish/varnish.vcl",
-     "-p",
-     "feature=+http2",
-     "-s",
-     "fellow=fellow,/cache/fellow-storage,512MB,512MB,10MB",
+      "-f",
+      "/service-versions/active/varnish/varnish.vcl",
+      "-p",
+      "feature=+http2",
+      "-s",
+      "fellow=fellow,/cache/fellow-storage,512MB,512MB,10MB",
     ]
     # Allow io_uring operations expected by slash fellow.
     security_opt:

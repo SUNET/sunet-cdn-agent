@@ -68,6 +68,8 @@ services:
     # Varnish does not need to listen to any network ports as all communication
     # between it and haproxy happens over a UNIX socket.
     command: [
+      "varnishd",
+      "-F",
       "-E",
       "/usr/lib/varnish/vmods/libvmod_slash.so",
       "-a",

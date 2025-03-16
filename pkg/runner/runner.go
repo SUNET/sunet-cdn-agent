@@ -51,6 +51,84 @@ type confWriterSettings struct {
 	CertDir           string `mapstructure:"cert_dir" validate:"required"`
 }
 
+// JSON format from "vcl.list -j" described here: https://varnish-cache.org/docs/trunk/reference/varnish-cli.html#json
+//
+// [ 2, ["vcl.list", "-j"], 1742022002.443,
+//
+//	  {
+//	    "status": "available",
+//	    "state": "auto",
+//	    "temperature": "cold",
+//	    "busy": 0,
+//	    "name": "name0"
+//	},
+//
+//	  {
+//	    "status": "active",
+//	    "state": "auto",
+//	    "temperature": "warm",
+//	    "busy": 2,
+//	    "name": "name1"
+//	}
+//
+// ]
+type vclListContent struct {
+	Version    int
+	Command    []string
+	Time       time.Time
+	LoadedVcls []loadedVcl
+}
+
+type loadedVcl struct {
+	Status      string
+	State       string
+	Temperature string
+	Busy        int64
+	Name        string
+}
+
+// Implement custom unmarshaller since the JSON structure outputted by
+// varnishadm is a list of different types which makes things a bit more
+// cumbersome to deal with.
+func (vclList *vclListContent) UnmarshalJSON(b []byte) error {
+	var tmp []json.RawMessage
+
+	if err := json.Unmarshal(b, &tmp); err != nil {
+		return err
+	}
+
+	// A version number for the JSON format (integer)
+	if err := json.Unmarshal(tmp[0], &vclList.Version); err != nil {
+		return err
+	}
+
+	// An array of strings that comprise the CLI command just received
+	if err := json.Unmarshal(tmp[1], &vclList.Command); err != nil {
+		return err
+	}
+
+	// The time at which the response was generated, as a Unix epoch time in seconds with millisecond precision (floating point)
+	var tmpFloat float64
+	if err := json.Unmarshal(tmp[2], &tmpFloat); err != nil {
+		return err
+	}
+	milliSeconds := int64(tmpFloat * 1000)
+	vclList.Time = time.UnixMilli(milliSeconds)
+
+	// The list of loaded VCL configs
+	listOffset := 3
+	for _, listEntry := range tmp[listOffset:] {
+		lv := loadedVcl{}
+		if err := json.Unmarshal(listEntry, &lv); err != nil {
+			return err
+		}
+
+		vclList.LoadedVcls = append(vclList.LoadedVcls, lv)
+	}
+
+	return nil
+}
+
 //go:embed templates/compose/default.template
 var cacheComposeTemplateFS embed.FS
 
@@ -326,7 +404,8 @@ func sha256SumFile(fn string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
+func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) (bool, error) {
+	modified := false
 	activeVersion := strconv.FormatInt(activeVersionInt, 10)
 
 	lnPath := filepath.Join(baseDir, "active")
@@ -338,29 +417,32 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
 			err := os.Symlink(activeVersion, lnPath)
 			if err != nil {
 				agt.logger.Err(err).Str("path", lnPath).Msg("unable to create symlink")
-				return err
+				return false, err
 			}
 			agt.logger.Info().Str("path", lnPath).Str("link_target", activeVersion).Msg("created active symlink")
+			modified = true
 		} else {
 			agt.logger.Err(err).Msg("stat of active symlink failed")
+			return false, err
 		}
 	} else {
 		// Error out if "active" is not actually a symlink
 		if lnInfo.Mode()&os.ModeSymlink != os.ModeSymlink {
 			agt.logger.Error().Str("mode", lnInfo.Mode().String()).Msg("the 'active' file is not a symlink, this is unexpected")
-			return err
+			return false, err
 		}
 
 		lnDest, err := os.Readlink(lnPath)
 		if err != nil {
 			agt.logger.Err(err).Str("path", lnPath).Msg("unable to get destination of symlink")
+			return false, err
 		}
 
 		// Verify the version being pointed to is a valid int
 		_, err = strconv.ParseInt(lnDest, 10, 64)
 		if err != nil {
 			agt.logger.Err(err).Str("dest", lnDest).Msg("unable to parse current link destination as int64, this is unexpected")
-			return err
+			return false, err
 		}
 
 		if lnDest != activeVersion {
@@ -374,20 +456,21 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) error {
 			err := os.Symlink(activeVersion, lnTmpPath)
 			if err != nil {
 				agt.logger.Err(err).Str("path", lnPath).Msg("unable to create temporary symlink")
-				return err
+				return false, err
 			}
 			err = os.Rename(lnTmpPath, lnPath)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to update active symlink")
-				return err
+				return false, err
 			}
 			agt.logger.Info().Str("src", lnTmpPath).Str("dest", lnPath).Msg("updated active symlink")
+			modified = true
 		}
 
 		// If the link already exists, make sure it is pointing to the correct version, otherwise update it
 	}
 	fmt.Println(lnPath, "->", activeVersion)
-	return nil
+	return modified, nil
 }
 
 func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid int) error {
@@ -557,6 +640,131 @@ func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVe
 	return nil
 }
 
+func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}) {
+	// Find out if there are containers running that need to be told that
+	// the active link points to a new version
+	// Expected output is something like this:
+	// ===
+	// sunet-cdn-agent-cache-7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
+	// sunet-cdn-agent-cache-7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-varnish-1
+	// ===
+	stdOut, stdErr, err := runCommand("docker", "ps", "--format", "{{.Names}}")
+	if err != nil {
+		agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("docker ps failed")
+		return
+	}
+
+	containerPrefix := "sunet-cdn-agent-cache-"
+	uuidLen := 36
+	containerNameScanner := bufio.NewScanner(strings.NewReader(stdOut))
+	for containerNameScanner.Scan() {
+		containerName := containerNameScanner.Text()
+		if !strings.HasPrefix(containerName, containerPrefix) {
+			continue
+		}
+
+		// Pick out the org and service id strings from the container name
+		orgID := containerName[len(containerPrefix) : len(containerPrefix)+uuidLen]
+		serviceID := containerName[len(containerPrefix)+uuidLen+1 : len(containerPrefix)+uuidLen*2+1]
+
+		// Skip any containers that have not had their active link modified
+		if _, ok := modifiedActiveLinks[orgID]; !ok {
+			continue
+		}
+		if _, ok := modifiedActiveLinks[orgID][serviceID]; !ok {
+			continue
+		}
+
+		agt.logger.Info().Str("container_name", containerName).Msg("container needs config update")
+
+		// We know the orgID and serviceID needs an update, now we just need to
+		// do the right thing based on what type of container it is.
+		switch {
+		case strings.Contains(containerName, "-varnish-"):
+			stdOut, stdErr, err := runCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
+			if err != nil {
+				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.list -j")
+				continue
+			}
+
+			vlc := vclListContent{}
+			err = json.Unmarshal([]byte(stdOut), &vlc)
+			if err != nil {
+				agt.logger.Err(err).Str("container_name", containerName).Msg("unable to parse varnishadm vcl.list -j")
+				continue
+			}
+
+			usedNames := map[string]struct{}{}
+
+			for _, lv := range vlc.LoadedVcls {
+				usedNames[lv.Name] = struct{}{}
+			}
+
+			var vclConfigName string
+
+			// Build a name like "sunet-cdn-agent-1742080867-0"
+			// where the first number is a unix timestamp and the
+			// second number is just a counter in case we somehow
+			// try to create more than one version inside the same
+			// second. Limit attempts to an upper bound so we dont
+			// loop forever if something is broken.
+			vclPrefix := "sunet-cdn-agent-"
+			baseName := fmt.Sprintf("%s%d", vclPrefix, time.Now().Unix())
+			for i := range 1000 {
+				tmpName := baseName + fmt.Sprintf("-%d", i)
+				if _, ok := usedNames[tmpName]; !ok {
+					// Not taken, use it
+					vclConfigName = tmpName
+					break
+				}
+			}
+			if vclConfigName == "" {
+				agt.logger.Err(err).Str("container_name", containerName).Msg("unable to generate unused varnish vcl name")
+				continue
+			}
+
+			stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, "/service-versions/active/varnish/default.vcl")
+			if err != nil {
+				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.load")
+			}
+
+			stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
+			if err != nil {
+				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.use")
+			}
+
+			// Cleanup any unused inactive versions without
+			// references. This will leave the "most recently
+			// inactived" version behind since we are working on
+			// data collected before the most recent version was
+			// loaded.
+			for _, lv := range vlc.LoadedVcls {
+				if strings.HasPrefix(lv.Name, vclPrefix) && lv.Status == "available" && lv.Busy == 0 {
+					agt.logger.Info().
+						Str("container_name", containerName).
+						Str("vcl_name", lv.Name).
+						Str("vcl_temp", lv.Temperature).
+						Str("vcl_state", lv.State).
+						Str("vcl_status", lv.Status).
+						Int64("vcl_busy", lv.Busy).
+						Msg("discarding unused vcl")
+					stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
+					if err != nil {
+						agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.discard")
+					}
+				}
+			}
+		default:
+			agt.logger.Info().Str("container_name", containerName).Msg("skipping unhandled container type")
+		}
+
+	}
+	if err := containerNameScanner.Err(); err != nil {
+		agt.logger.Err(err).Msg("reading docker ps output failed")
+		return
+	}
+}
+
 type orgIPContainer struct {
 	ID                  pgtype.UUID
 	ServiceIPContainers []serviceIPContainer
@@ -631,6 +839,11 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	}
 
 	modifiedSystemdServices := []string{}
+
+	// This map is a orgIDs -> serviceIDs where the active version changed
+	// It is used to know what containers need to be notified that they should
+	// reload their config.
+	modifiedActiveLinks := map[string]map[string]struct{}{}
 
 	// Expected directory structure:
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/default.vcl
@@ -785,12 +998,23 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				}
 
 				if version.Active {
-					err = agt.setActiveLink(versionBasePath, version.Version)
+					activeLinkModified, err := agt.setActiveLink(versionBasePath, version.Version)
 					if err != nil {
 						agt.logger.Err(err).Msg("unable to set active link")
 						return
 					}
 					serviceIsActive = true
+
+					if activeLinkModified {
+						if _, ok := modifiedActiveLinks[org.ID.String()]; !ok {
+							modifiedActiveLinks[org.ID.String()] = map[string]struct{}{
+								service.ID.String(): {},
+							}
+						} else {
+							modifiedActiveLinks[org.ID.String()][service.ID.String()] = struct{}{}
+						}
+					}
+
 				}
 			}
 
@@ -871,6 +1095,14 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			}
 		}
 	}
+
+	// Reload configs for any containers whose active symlinks were updated.
+	// Do this before setting up any new systemd services since in that
+	// case we would end up reloading the config of a just created/started
+	// container (and there is a larger chance of a race condition if
+	// trying to update the config of a container that is still not fully
+	// started).
+	agt.reloadContainerConfigs(modifiedActiveLinks)
 
 	if len(modifiedSystemdServices) > 0 {
 		agt.logger.Info().Msg("calling systemctl deamon-reload")

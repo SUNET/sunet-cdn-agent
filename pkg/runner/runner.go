@@ -596,7 +596,7 @@ func (agt *agent) collectIPAddresses(orgs map[string]types.OrgWithServices, orde
 	return allIPAddrs
 }
 
-func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
+func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}, org types.OrgWithServices, service types.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
 	for _, versionNumber := range orderedVersions {
 		version := service.ServiceVersions[versionNumber]
 
@@ -630,9 +630,19 @@ func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVe
 				haproxyCombinedFile := filepath.Join(certsPrivatePath, string(domain)+".pem")
 				tlsContent := string(fullChainData)
 				tlsContent += string(privKeyData)
-				_, err = agt.createOrUpdateFile(haproxyCombinedFile, int(haProxyUID), 0, 0o600, tlsContent)
+				modified, err := agt.createOrUpdateFile(haproxyCombinedFile, int(haProxyUID), 0, 0o600, tlsContent)
 				if err != nil {
 					return err
+				}
+
+				if modified {
+					if _, ok := modifiedCerts[org.ID.String()]; !ok {
+						modifiedCerts[org.ID.String()] = map[string]struct{}{
+							service.ID.String(): {},
+						}
+					} else {
+						modifiedCerts[org.ID.String()][service.ID.String()] = struct{}{}
+					}
 				}
 			}
 		}
@@ -733,7 +743,7 @@ func (agt *agent) reloadHAProxy(containerName string) error {
 	return nil
 }
 
-func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}) {
+func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}, modifiedCerts map[string]map[string]struct{}) {
 	// Find out if there are containers running that need to be told that
 	// the active link points to a new version
 	// Expected output is something like this:
@@ -750,6 +760,9 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	containerPrefix := "sunet-cdn-agent-cache-"
 	uuidLen := 36
 	containerNameScanner := bufio.NewScanner(strings.NewReader(stdOut))
+
+	containerActiveChanged := map[string]struct{}{}
+	containerCertChanged := map[string]struct{}{}
 	for containerNameScanner.Scan() {
 		containerName := containerNameScanner.Text()
 		if !strings.HasPrefix(containerName, containerPrefix) {
@@ -760,16 +773,56 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		orgID := containerName[len(containerPrefix) : len(containerPrefix)+uuidLen]
 		serviceID := containerName[len(containerPrefix)+uuidLen+1 : len(containerPrefix)+uuidLen*2+1]
 
-		// Skip any containers that have not had their active link modified
-		if _, ok := modifiedActiveLinks[orgID]; !ok {
-			continue
-		}
-		if _, ok := modifiedActiveLinks[orgID][serviceID]; !ok {
-			continue
+		// Record containers for services who have had their active
+		// symlink updated, this affects all containers for that service
+		if _, ok := modifiedActiveLinks[orgID]; ok {
+			if _, ok := modifiedActiveLinks[orgID][serviceID]; ok {
+				agt.logger.Info().Str("container_name", containerName).Msg("active symlink changed, updating config")
+				containerActiveChanged[containerName] = struct{}{}
+			}
 		}
 
-		// We know the orgID and serviceID needs an update, now we just need to
-		// do the right thing based on what type of container it is.
+		// Record TLS handling containers for services that have had
+		// their cert modified
+		if _, ok := modifiedCerts[orgID]; ok {
+			if _, ok := modifiedCerts[orgID][serviceID]; ok {
+				if strings.Contains(containerName, "-haproxy-") {
+					agt.logger.Info().Str("container_name", containerName).Msg("cert changed, needs to reload")
+					containerCertChanged[containerName] = struct{}{}
+				}
+			}
+		}
+	}
+	if err := containerNameScanner.Err(); err != nil {
+		agt.logger.Err(err).Msg("reading docker ps output failed")
+		return
+	}
+
+	// Since haproxy is reloaded the same way no matter if it is due to
+	// cert change or config symlink change just merge the two lists
+	// together here so we only reload haproxy at most once.
+	mergedContainers := map[string]struct{}{}
+
+	for containerName := range containerActiveChanged {
+		mergedContainers[containerName] = struct{}{}
+	}
+
+	for containerName := range containerCertChanged {
+		mergedContainers[containerName] = struct{}{}
+	}
+
+	// Do updates in sorted order so things are a bit more deterministic
+	// and easy to follow
+	sortedMergedContainers := []string{}
+
+	for containerName := range mergedContainers {
+		sortedMergedContainers = append(sortedMergedContainers, containerName)
+	}
+
+	slices.Sort(sortedMergedContainers)
+
+	for _, containerName := range sortedMergedContainers {
+		// Do the right thing based on what type of container needs a reload.
 		switch {
 		case strings.Contains(containerName, "-varnish-"):
 			err := agt.loadNewVcl(containerName)
@@ -786,11 +839,6 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		default:
 			agt.logger.Info().Str("container_name", containerName).Msg("skipping unhandled container type")
 		}
-
-	}
-	if err := containerNameScanner.Err(); err != nil {
-		agt.logger.Err(err).Msg("reading docker ps output failed")
-		return
 	}
 }
 
@@ -873,6 +921,11 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	// It is used to know what containers need to be notified that they should
 	// reload their config.
 	modifiedActiveLinks := map[string]map[string]struct{}{}
+
+	// This map is a orgIDs -> serviceIDs where the active version changed
+	// It is used to know what containers need to be notified that they should
+	// reload their config.
+	modifiedCerts := map[string]map[string]struct{}{}
 
 	// Expected directory structure:
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/default.vcl
@@ -980,7 +1033,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 			// situation where the active link points to a version
 			// of the config with references to TLS files that are
 			// not present, making things fail to start.
-			err := agt.addCertsToService(service, orderedVersions, certsPrivatePath, haProxyUID)
+			err := agt.addCertsToService(modifiedCerts, org, service, orderedVersions, certsPrivatePath, haProxyUID)
 			if err != nil {
 				continue serviceLoop
 			}
@@ -1131,7 +1184,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	// container (and there is a larger chance of a race condition if
 	// trying to update the config of a container that is still not fully
 	// started).
-	agt.reloadContainerConfigs(modifiedActiveLinks)
+	agt.reloadContainerConfigs(modifiedActiveLinks, modifiedCerts)
 
 	if len(modifiedSystemdServices) > 0 {
 		agt.logger.Info().Msg("calling systemctl deamon-reload")

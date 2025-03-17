@@ -721,6 +721,18 @@ func (agt *agent) loadNewVcl(containerName string) error {
 	return nil
 }
 
+func (agt *agent) reloadHAProxy(containerName string) error {
+	// HAProxy in master-worker mode will do a seamless reload if sent SIGUSR2
+	// https://docs.haproxy.org/2.9/configuration.html#3.1-master-worker
+	stdOut, stdErr, err := runCommand("docker", "kill", "--signal", "USR2", containerName)
+	if err != nil {
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to send SIGUSR2 to haproxy")
+		return err
+	}
+
+	return nil
+}
+
 func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}) {
 	// Find out if there are containers running that need to be told that
 	// the active link points to a new version
@@ -756,8 +768,6 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 			continue
 		}
 
-		agt.logger.Info().Str("container_name", containerName).Msg("container needs config update")
-
 		// We know the orgID and serviceID needs an update, now we just need to
 		// do the right thing based on what type of container it is.
 		switch {
@@ -766,6 +776,13 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 			if err != nil {
 				continue
 			}
+			agt.logger.Info().Str("container_name", containerName).Msg("VCL updated")
+		case strings.Contains(containerName, "-haproxy-"):
+			err := agt.reloadHAProxy(containerName)
+			if err != nil {
+				continue
+			}
+			agt.logger.Info().Str("container_name", containerName).Msg("haproxy reloaded")
 		default:
 			agt.logger.Info().Str("container_name", containerName).Msg("skipping unhandled container type")
 		}

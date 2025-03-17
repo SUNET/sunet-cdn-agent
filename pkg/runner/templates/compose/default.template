@@ -8,6 +8,7 @@ services:
       - {{.SharedDir}}:/shared
       - {{.CertsDir}}:/certs:ro
       - {{.CertsPrivateDir}}:/certs-private:ro
+      - {{.HAProxyStatsDir}}:/haproxy-stats
     # Override default Cmd since we have the "active" symlink indirection to
     # reach the configuration
     command: [

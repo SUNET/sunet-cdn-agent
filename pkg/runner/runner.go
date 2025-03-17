@@ -640,6 +640,87 @@ func (agt *agent) addCertsToService(service types.ServiceWithVersions, orderedVe
 	return nil
 }
 
+func (agt *agent) loadNewVcl(containerName string) error {
+	stdOut, stdErr, err := runCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
+	if err != nil {
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.list -j")
+		return err
+	}
+
+	vlc := vclListContent{}
+	err = json.Unmarshal([]byte(stdOut), &vlc)
+	if err != nil {
+		agt.logger.Err(err).Str("container_name", containerName).Msg("unable to parse varnishadm vcl.list -j")
+		return err
+	}
+
+	usedNames := map[string]struct{}{}
+
+	for _, lv := range vlc.LoadedVcls {
+		usedNames[lv.Name] = struct{}{}
+	}
+
+	var vclConfigName string
+
+	// Build a name like "sunet-cdn-agent-1742080867-0"
+	// where the first number is a unix timestamp and the
+	// second number is just a counter in case we somehow
+	// try to create more than one version inside the same
+	// second. Limit attempts to an upper bound so we dont
+	// loop forever if something is broken.
+	vclPrefix := "sunet-cdn-agent-"
+	baseName := fmt.Sprintf("%s%d", vclPrefix, time.Now().Unix())
+	for i := range 1000 {
+		tmpName := baseName + fmt.Sprintf("-%d", i)
+		if _, ok := usedNames[tmpName]; !ok {
+			// Not taken, use it
+			vclConfigName = tmpName
+			break
+		}
+	}
+	if vclConfigName == "" {
+		agt.logger.Error().Str("container_name", containerName).Msg("unable to generate unused varnish vcl name")
+		return err
+	}
+
+	stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, "/service-versions/active/varnish/default.vcl")
+	if err != nil {
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.load")
+		return err
+	}
+
+	stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
+	if err != nil {
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.use")
+		return err
+	}
+
+	// Cleanup any unused inactive versions without
+	// references. This will leave the "most recently
+	// inactived" version behind since we are working on
+	// data collected before the most recent version was
+	// loaded.
+	for _, lv := range vlc.LoadedVcls {
+		if strings.HasPrefix(lv.Name, vclPrefix) && lv.Status == "available" && lv.Busy == 0 {
+			agt.logger.Info().
+				Str("container_name", containerName).
+				Str("vcl_name", lv.Name).
+				Str("vcl_temp", lv.Temperature).
+				Str("vcl_state", lv.State).
+				Str("vcl_status", lv.Status).
+				Int64("vcl_busy", lv.Busy).
+				Msg("discarding unused vcl")
+			stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
+			if err != nil {
+				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.discard")
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}) {
 	// Find out if there are containers running that need to be told that
 	// the active link points to a new version
@@ -681,78 +762,9 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		// do the right thing based on what type of container it is.
 		switch {
 		case strings.Contains(containerName, "-varnish-"):
-			stdOut, stdErr, err := runCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
+			err := agt.loadNewVcl(containerName)
 			if err != nil {
-				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.list -j")
 				continue
-			}
-
-			vlc := vclListContent{}
-			err = json.Unmarshal([]byte(stdOut), &vlc)
-			if err != nil {
-				agt.logger.Err(err).Str("container_name", containerName).Msg("unable to parse varnishadm vcl.list -j")
-				continue
-			}
-
-			usedNames := map[string]struct{}{}
-
-			for _, lv := range vlc.LoadedVcls {
-				usedNames[lv.Name] = struct{}{}
-			}
-
-			var vclConfigName string
-
-			// Build a name like "sunet-cdn-agent-1742080867-0"
-			// where the first number is a unix timestamp and the
-			// second number is just a counter in case we somehow
-			// try to create more than one version inside the same
-			// second. Limit attempts to an upper bound so we dont
-			// loop forever if something is broken.
-			vclPrefix := "sunet-cdn-agent-"
-			baseName := fmt.Sprintf("%s%d", vclPrefix, time.Now().Unix())
-			for i := range 1000 {
-				tmpName := baseName + fmt.Sprintf("-%d", i)
-				if _, ok := usedNames[tmpName]; !ok {
-					// Not taken, use it
-					vclConfigName = tmpName
-					break
-				}
-			}
-			if vclConfigName == "" {
-				agt.logger.Err(err).Str("container_name", containerName).Msg("unable to generate unused varnish vcl name")
-				continue
-			}
-
-			stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, "/service-versions/active/varnish/default.vcl")
-			if err != nil {
-				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.load")
-			}
-
-			stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
-			if err != nil {
-				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.use")
-			}
-
-			// Cleanup any unused inactive versions without
-			// references. This will leave the "most recently
-			// inactived" version behind since we are working on
-			// data collected before the most recent version was
-			// loaded.
-			for _, lv := range vlc.LoadedVcls {
-				if strings.HasPrefix(lv.Name, vclPrefix) && lv.Status == "available" && lv.Busy == 0 {
-					agt.logger.Info().
-						Str("container_name", containerName).
-						Str("vcl_name", lv.Name).
-						Str("vcl_temp", lv.Temperature).
-						Str("vcl_state", lv.State).
-						Str("vcl_status", lv.Status).
-						Int64("vcl_busy", lv.Busy).
-						Msg("discarding unused vcl")
-					stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
-					if err != nil {
-						agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.discard")
-					}
-				}
 			}
 		default:
 			agt.logger.Info().Str("container_name", containerName).Msg("skipping unhandled container type")

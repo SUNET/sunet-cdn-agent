@@ -129,17 +129,8 @@ func (vclList *vclListContent) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-//go:embed templates/compose/default.template
-var cacheComposeTemplateFS embed.FS
-
-//go:embed templates/seccomp/varnish-slash-seccomp.json
-var seccompTemplateFS embed.FS
-
-//go:embed templates/systemd-service/default.template
-var cacheServiceTemplateFS embed.FS
-
-//go:embed templates/systemd-networkd/dummy.network
-var systemdDummyNetworkTemplateFS embed.FS
+//go:embed templates
+var templateFS embed.FS
 
 // use a single instance of Validate, it caches struct info
 var validate = validator.New(validator.WithRequiredStructEnabled())
@@ -1376,22 +1367,22 @@ func Run(logger zerolog.Logger) error {
 
 	tmpls := templates{}
 
-	tmpls.cacheCompose, err = template.ParseFS(cacheComposeTemplateFS, "templates/compose/default.template")
+	tmpls.cacheCompose, err = template.ParseFS(templateFS, "templates/compose/default.template")
 	if err != nil {
 		return err
 	}
 
-	tmpls.cacheService, err = template.ParseFS(cacheServiceTemplateFS, "templates/systemd-service/default.template")
+	tmpls.cacheService, err = template.ParseFS(templateFS, "templates/systemd-service/default.template")
 	if err != nil {
 		return err
 	}
 
-	tmpls.slashSeccompFile, err = template.ParseFS(seccompTemplateFS, "templates/seccomp/varnish-slash-seccomp.json")
+	tmpls.slashSeccompFile, err = template.ParseFS(templateFS, "templates/seccomp/varnish-slash-seccomp.json")
 	if err != nil {
 		return err
 	}
 
-	tmpls.systemdDummyNetwork, err = template.ParseFS(systemdDummyNetworkTemplateFS, "templates/systemd-networkd/dummy.network")
+	tmpls.systemdDummyNetwork, err = template.ParseFS(templateFS, "templates/systemd-networkd/dummy.network")
 	if err != nil {
 		return err
 	}

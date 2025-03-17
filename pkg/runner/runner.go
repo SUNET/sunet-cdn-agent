@@ -1019,6 +1019,13 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 				return
 			}
 
+			unixSocketPath := filepath.Join(sharedPath, "unix-sockets")
+			err = agt.createDirPathIfNeeded(unixSocketPath, 0, int(commonGID), 0o770)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create shared unix-sockets dir")
+				return
+			}
+
 			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
 			err = agt.createDirPathIfNeeded(certsPrivatePath, int(haProxyUID), 0, 0o700)
 			if err != nil {

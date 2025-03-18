@@ -845,10 +845,10 @@ type serviceIPContainer struct {
 }
 
 func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
-	confPath := filepath.Join(agt.conf.ConfWriter.RootDir, "conf")
-	err := agt.createDirPathIfNeeded(confPath, 0, 0, 0o700)
+	cacheConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "cache-conf")
+	err := agt.createDirPathIfNeeded(cacheConfPath, 0, 0, 0o700)
 	if err != nil {
-		agt.logger.Err(err).Msg("unable to create conf dir")
+		agt.logger.Err(err).Msg("unable to create cache-conf dir")
 		return
 	}
 
@@ -866,7 +866,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 		return
 	}
 
-	seccompDir := filepath.Join(confPath, "seccomp")
+	seccompDir := filepath.Join(cacheConfPath, "seccomp")
 	err = agt.createDirPathIfNeeded(seccompDir, 0, 0, 0o700)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create seccomp dir")
@@ -939,7 +939,7 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	for _, orgUUID := range orderedOrgs {
 		org := cnc.Orgs[orgUUID]
 
-		orgPath := filepath.Join(confPath, "orgs")
+		orgPath := filepath.Join(cacheConfPath, "orgs")
 		err = agt.createDirPathIfNeeded(orgPath, 0, 0, 0o700)
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to create orgs dir")
@@ -1210,7 +1210,11 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 	}
 }
 
-func (agt *agent) loop(wg *sync.WaitGroup) {
+func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup) {
+	defer wg.Done()
+}
+
+func (agt *agent) cacheNodeLoop(wg *sync.WaitGroup) {
 	defer wg.Done()
 
 mainLoop:
@@ -1327,7 +1331,7 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 	return modified, nil
 }
 
-func Run(logger zerolog.Logger) error {
+func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1395,8 +1399,17 @@ func Run(logger zerolog.Logger) error {
 	agt := newAgent(ctx, logger, c, tmpls, conf)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go agt.loop(&wg)
+
+	if cacheNode {
+		wg.Add(1)
+		go agt.cacheNodeLoop(&wg)
+	}
+
+	if l4lbNode {
+		wg.Add(1)
+		go agt.l4lbNodeLoop(&wg)
+	}
+
 	wg.Wait()
 
 	return nil

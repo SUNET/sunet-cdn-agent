@@ -26,6 +26,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/SUNET/sunet-cdn-agent/pkg/ipvsadm"
 	"github.com/SUNET/sunet-cdn-manager/pkg/types"
 	"github.com/go-playground/validator/v10"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -36,6 +37,7 @@ import (
 type config struct {
 	Manager    managerSettings
 	ConfWriter confWriterSettings
+	L4LBNode   l4lbNodeSettings `mapstructure:"l4lb-node"`
 }
 
 type managerSettings struct {
@@ -49,6 +51,10 @@ type confWriterSettings struct {
 	SystemdSystemDir  string `mapstructure:"systemd_system_dir" validate:"required"`
 	SystemdNetworkDir string `mapstructure:"systemd_network_dir" validate:"required"`
 	CertDir           string `mapstructure:"cert_dir" validate:"required"`
+}
+
+type l4lbNodeSettings struct {
+	NetNSConfDir string `mapstructure:"netns_conf_dir" validate:"required"`
 }
 
 // JSON format from "vcl.list -j" described here: https://varnish-cache.org/docs/trunk/reference/varnish-cli.html#json
@@ -258,6 +264,49 @@ func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, perm os.
 	}
 
 	return modified, nil
+}
+
+func (agt *agent) getL4LBNodeConfig() (types.L4LBNodeConfig, error) {
+	u, err := url.Parse(agt.conf.Manager.URL)
+	if err != nil {
+		return types.L4LBNodeConfig{}, err
+	}
+
+	configURL, err := url.JoinPath(u.String(), "api/v1/l4lb-node-configs")
+	if err != nil {
+		return types.L4LBNodeConfig{}, err
+	}
+
+	req, err := http.NewRequest("GET", configURL, nil)
+	if err != nil {
+		return types.L4LBNodeConfig{}, err
+	}
+
+	req.SetBasicAuth(agt.conf.Manager.Username, agt.conf.Manager.Password)
+
+	resp, err := agt.httpClient.Do(req)
+	if err != nil {
+		return types.L4LBNodeConfig{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return types.L4LBNodeConfig{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	lnc := types.L4LBNodeConfig{}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return types.L4LBNodeConfig{}, err
+	}
+
+	err = json.Unmarshal(b, &lnc)
+	if err != nil {
+		return types.L4LBNodeConfig{}, err
+	}
+
+	return lnc, nil
 }
 
 func (agt *agent) getCacheNodeConfig() (types.CacheNodeConfig, error) {
@@ -844,7 +893,268 @@ type serviceIPContainer struct {
 	IPAddresses []netip.Addr
 }
 
-func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
+// netns-config JSON expected by
+// https://platform.sunet.se/sunet-cdn/cdn-ops/src/branch/main/global/overlay/etc/puppet/modules/cdn/files/l4lb/sunet-l4lb-namespace:
+//
+//	{
+//	 "namespace1": {
+//	   "interface1": {
+//	     "ipv4": [
+//	       "192.168.10.1/31"
+//	     ],
+//	     "ipv6": [
+//	       "2001:db8:1337:74::1/127"
+//	     ]
+//	   },
+//	   "interface2": {
+//	     "ipv4": [
+//	       "192.168.10.3/31"
+//	     ],
+//	     "ipv6": [
+//	       "2001:db8:1338:75::1/127"
+//	     ]
+//	   }
+//	 }
+//	}
+type netnsConfig map[string]interfaceConfig
+
+type interfaceConfig map[string]addressConfig
+
+type addressConfig map[string][]string
+
+func (agt *agent) setupNetNS(lnc types.L4LBNodeConfig) error {
+	namespaceName := "l4lb"
+	interfaceName := "dummy0"
+	ipv4Key := "ipv4"
+	ipv6Key := "ipv6"
+
+	nsConf := netnsConfig{
+		namespaceName: interfaceConfig{
+			interfaceName: addressConfig{},
+		},
+	}
+
+	for _, srvConn := range lnc.Services {
+		for _, address := range srvConn.ServiceIPAddresses {
+			bits := strconv.Itoa(address.Unmap().BitLen())
+			if address.Unmap().Is4() {
+				nsConf[namespaceName][interfaceName][ipv4Key] = append(nsConf[namespaceName][interfaceName][ipv4Key], address.Unmap().String()+"/"+bits)
+			} else if address.Unmap().Is6() {
+				nsConf[namespaceName][interfaceName][ipv6Key] = append(nsConf[namespaceName][interfaceName][ipv6Key], address.Unmap().String()+"/"+bits)
+			}
+		}
+	}
+
+	b, err := json.MarshalIndent(nsConf, "", "  ")
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create JSON for netns config")
+		return err
+	}
+
+	netnsConfFile := filepath.Join(agt.conf.L4LBNode.NetNSConfDir, "netns-sunet-cdn-agent.json")
+	netNSModified, err := agt.createOrUpdateFile(netnsConfFile, 0, 0, 0o644, string(b))
+	if err != nil {
+		agt.logger.Err(err).Str("path", netnsConfFile).Msg("unable to write out netns conf file")
+		return err
+	}
+
+	if netNSModified {
+		args := []string{"systemctl", "restart", "sunet-l4lb-namespace.service"}
+		agt.logger.Info().Strs("cmd", args).Msg("running command")
+		stdout, stderr, err := runCommand(args[0], args[1:]...)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
+		}
+	}
+
+	return nil
+}
+
+func (agt *agent) setupIpvsadm(lnc types.L4LBNodeConfig, l4lbConfPath string) error {
+	ipvsadmConfPath := filepath.Join(l4lbConfPath, "ipvsadm")
+	err := agt.createDirPathIfNeeded(ipvsadmConfPath, 0, 0, 0o700)
+	if err != nil {
+		agt.logger.Err(err).Str("path", ipvsadmConfPath).Msg("unable to create ipvsadm conf dir")
+		return err
+	}
+
+	// ipvsadm --save --numeric output:
+	// -A -t <service-ipv4>:80 -s mh
+	// -a -t <service-ipv4>:80 -r <cache-node-ipv4>:80 -i -w 1 --tun-type ipip
+	// -A -t <service-ipv4>:443 -s mh
+	// -a -t <service-ipv4>:443 -r <cache-node-ipv4>:443 -i -w 1 --tun-type ipip
+	// -A -t [<service-ipv6>]:80 -s mh
+	// -a -t [<service-ipv6>]:80 -r [<cache-node-ipv6>]:80 -i -w 1 --tun-type ipip
+	// -A -t [<service-ipv6>]:443 -s mh
+	// -a -t [<service-ipv6]:443 -r [<cache-node-ipv6>]:443 -i -w 1 --tun-type ipip
+
+	// Store rules in a slice to track ordering
+	// newIPVSRules := []string{}
+	newIPVSRules := ipvsadm.NewRuleset()
+
+	for _, sip := range lnc.Services {
+		for _, serviceAddr := range sip.ServiceIPAddresses {
+			unmapServiceAddr := serviceAddr.Unmap()
+			if sip.HTTP {
+				var port uint16 = 80
+
+				vs, err := ipvsadm.NewVirtualService("tcp", unmapServiceAddr, port, "mh")
+				if err != nil {
+					return fmt.Errorf("unable to init HTTP virtual service: %w", err)
+				}
+
+				err = newIPVSRules.AddVS(vs)
+				if err != nil {
+					return fmt.Errorf("unable to add HTTP service address to ruleset: %w", err)
+				}
+
+				for _, cacheNode := range lnc.CacheNodes {
+					weight := 1
+					if cacheNode.Maintenance {
+						weight = 0
+					}
+
+					if unmapServiceAddr.Is4() {
+						if cacheNode.IPv4Address != nil {
+							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv4Address.Unmap(), port, weight, "ipip")
+							if err != nil {
+								return fmt.Errorf("unable to init HTTP IPv4 cachenode real-server: %w", err)
+							}
+
+							err = newIPVSRules.AddRS(rs)
+							if err != nil {
+								return fmt.Errorf("unable to add HTTP IPv4 cachenode real-server to ruleset: %w", err)
+							}
+						}
+					}
+					if serviceAddr.Unmap().Is6() {
+						if cacheNode.IPv6Address != nil {
+							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv6Address.Unmap(), port, weight, "ipip")
+							if err != nil {
+								return fmt.Errorf("unable to init HTTP IPv6 cachenode real-server: %w", err)
+							}
+
+							err = newIPVSRules.AddRS(rs)
+							if err != nil {
+								return fmt.Errorf("unable to add HTTP IPv6 cachenode real-server to ruleset: %w", err)
+							}
+						}
+					}
+				}
+			}
+			if sip.HTTPS {
+				var port uint16 = 443
+
+				vs, err := ipvsadm.NewVirtualService("tcp", unmapServiceAddr, port, "mh")
+				if err != nil {
+					return fmt.Errorf("unable to init HTTPS virtual service: %w", err)
+				}
+
+				err = newIPVSRules.AddVS(vs)
+				if err != nil {
+					return fmt.Errorf("unable to add HTTPS service address to ruleset: %w", err)
+				}
+
+				for _, cacheNode := range lnc.CacheNodes {
+					weight := 1
+					if cacheNode.Maintenance {
+						weight = 0
+					}
+					if unmapServiceAddr.Is4() {
+						if cacheNode.IPv4Address != nil {
+							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv4Address.Unmap(), port, weight, "ipip")
+							if err != nil {
+								return fmt.Errorf("unable to init HTTPS IPv4 cachenode real-server: %w", err)
+							}
+
+							err = newIPVSRules.AddRS(rs)
+							if err != nil {
+								return fmt.Errorf("unable to add HTTPS IPv4 cachenode real-server to ruleset: %w", err)
+							}
+						}
+					}
+					if unmapServiceAddr.Is6() {
+						if cacheNode.IPv6Address != nil {
+							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv6Address.Unmap(), port, weight, "ipip")
+							if err != nil {
+								return fmt.Errorf("unable to init HTTPS IPv6 cachenode real-server: %w", err)
+							}
+
+							err = newIPVSRules.AddRS(rs)
+							if err != nil {
+								return fmt.Errorf("unable to add HTTPS IPv6S cachenode real-server to ruleset: %w", err)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	newIPVSRulesString := newIPVSRules.GenerateRules()
+
+	ipvsadmRestoreFile := filepath.Join(ipvsadmConfPath, "ipvsadm.restore")
+	_, err = agt.createOrUpdateFile(ipvsadmRestoreFile, 0, 0, 0o600, newIPVSRulesString)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to write out ipvsadm.restore")
+		return err
+	}
+
+	// Unfortunately "ipvsadm --restore" will not atomically replace what
+	// is currently loaded with what is in the restore file.
+	// Instead it is more like running ipvsadm in a script by hand: if the
+	// rule being loaded already exists ipvsadm will complain but continue with
+	// the next rule, and if there are rules loaded which are no longer in
+	// the file these will just remain loaded.
+	//
+	// While we will still write out a new file to disk to handle a reboot,
+	// we need to manually figure out what rules should be removed and what
+	// rules should be added so we can do this at runtime. The other
+	// approach would be to write out the file and then do "ipvsadm
+	// --clear" followed by "ipvsadm --restore" but clearing out all
+	// existing rules is not great since it would cause a glitch for all
+	// services.
+	stdout, stderr, err := runCommand("ipvsadm", "--save", "--numeric")
+	if err != nil {
+		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("ipvsadm --save --numeric failed")
+		return fmt.Errorf("unable to run ipvsadm --save --numeric: %w", err)
+	}
+
+	loadedIPVSRules, err := ipvsadm.ParseRules(stdout)
+	if err != nil {
+		return fmt.Errorf("unable to parse ipvsadm output: %w", err)
+	}
+
+	updates := ipvsadm.FindRuleUpdates(loadedIPVSRules, newIPVSRules)
+
+	err = ipvsadm.UpdateRules(loadedIPVSRules, newIPVSRules, updates)
+	if err != nil {
+		return fmt.Errorf("unable to update loaded ipvsadm rules: %w", err)
+	}
+
+	return nil
+}
+
+func (agt *agent) generateL4LBFiles(lnc types.L4LBNodeConfig) {
+	l4lbConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "l4lb-conf")
+	err := agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o700)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create l4lb-conf dir")
+		return
+	}
+
+	err = agt.setupNetNS(lnc)
+	if err != nil {
+		return
+	}
+
+	err = agt.setupIpvsadm(lnc, l4lbConfPath)
+	if err != nil {
+		return
+	}
+}
+
+func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	cacheConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "cache-conf")
 	err := agt.createDirPathIfNeeded(cacheConfPath, 0, 0, 0o700)
 	if err != nil {
@@ -1212,6 +1522,22 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup) {
 	defer wg.Done()
+
+mainLoop:
+	for {
+		lnc, err := agt.getL4LBNodeConfig()
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to fetch l4lb node config")
+		} else {
+			agt.generateL4LBFiles(lnc)
+		}
+		// Wait for the next time to run the loop, or exit if we are sutting down
+		select {
+		case <-time.Tick(time.Second * 10):
+		case <-agt.ctx.Done():
+			break mainLoop
+		}
+	}
 }
 
 func (agt *agent) cacheNodeLoop(wg *sync.WaitGroup) {
@@ -1223,7 +1549,7 @@ mainLoop:
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to fetch cache node config")
 		} else {
-			agt.generateFiles(cnc)
+			agt.generateCacheFiles(cnc)
 		}
 		// Wait for the next time to run the loop, or exit if we are sutting down
 		select {

@@ -643,14 +643,14 @@ func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}
 }
 
 func (agt *agent) loadNewVcl(containerName string) error {
-	stdOut, stdErr, err := runCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
+	stdout, stderr, err := runCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.list -j")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.list -j")
 		return err
 	}
 
 	vlc := vclListContent{}
-	err = json.Unmarshal([]byte(stdOut), &vlc)
+	err = json.Unmarshal([]byte(stdout), &vlc)
 	if err != nil {
 		agt.logger.Err(err).Str("container_name", containerName).Msg("unable to parse varnishadm vcl.list -j")
 		return err
@@ -685,15 +685,15 @@ func (agt *agent) loadNewVcl(containerName string) error {
 		return err
 	}
 
-	stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, "/service-versions/active/varnish/default.vcl")
+	stdout, stderr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, "/service-versions/active/varnish/default.vcl")
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.load")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.load")
 		return err
 	}
 
-	stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
+	stdout, stderr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.use")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.use")
 		return err
 	}
 
@@ -712,9 +712,9 @@ func (agt *agent) loadNewVcl(containerName string) error {
 				Str("vcl_status", lv.Status).
 				Int64("vcl_busy", lv.Busy).
 				Msg("discarding unused vcl")
-			stdOut, stdErr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
+			stdout, stderr, err = runCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
 			if err != nil {
-				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to call varnishadm vcl.discard")
+				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.discard")
 				return err
 			}
 		}
@@ -726,9 +726,9 @@ func (agt *agent) loadNewVcl(containerName string) error {
 func (agt *agent) reloadHAProxy(containerName string) error {
 	// HAProxy in master-worker mode will do a seamless reload if sent SIGUSR2
 	// https://docs.haproxy.org/2.9/configuration.html#3.1-master-worker
-	stdOut, stdErr, err := runCommand("docker", "kill", "--signal", "USR2", containerName)
+	stdout, stderr, err := runCommand("docker", "kill", "--signal", "USR2", containerName)
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdOut).Str("stderr", stdErr).Msg("unable to send SIGUSR2 to haproxy")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to send SIGUSR2 to haproxy")
 		return err
 	}
 
@@ -743,15 +743,15 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	// sunet-cdn-agent-cache-7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
 	// sunet-cdn-agent-cache-7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-varnish-1
 	// ===
-	stdOut, stdErr, err := runCommand("docker", "ps", "--format", "{{.Names}}")
+	stdout, stderr, err := runCommand("docker", "ps", "--format", "{{.Names}}")
 	if err != nil {
-		agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("docker ps failed")
+		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("docker ps failed")
 		return
 	}
 
 	containerPrefix := "sunet-cdn-agent-cache-"
 	uuidLen := 36
-	containerNameScanner := bufio.NewScanner(strings.NewReader(stdOut))
+	containerNameScanner := bufio.NewScanner(strings.NewReader(stdout))
 
 	containerActiveChanged := map[string]struct{}{}
 	containerCertChanged := map[string]struct{}{}
@@ -899,9 +899,9 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 		if modified {
 			agt.logger.Info().Msg("calling networkctl reload")
-			stdOut, stdErr, err := runCommand("networkctl", "reload")
+			stdout, stderr, err := runCommand("networkctl", "reload")
 			if err != nil {
-				agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("networkctl reload failed")
+				agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("networkctl reload failed")
 				return
 			}
 		}
@@ -1195,9 +1195,9 @@ func (agt *agent) generateFiles(cnc types.CacheNodeConfig) {
 
 	if len(modifiedSystemdServices) > 0 {
 		agt.logger.Info().Msg("calling systemctl deamon-reload")
-		stdOut, stdErr, err := runCommand("systemctl", "daemon-reload")
+		stdout, stderr, err := runCommand("systemctl", "daemon-reload")
 		if err != nil {
-			agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl deamon-reload failed")
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl deamon-reload failed")
 			return
 		}
 
@@ -1246,13 +1246,13 @@ func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls 
 
 func runCommand(name string, arg ...string) (string, string, error) {
 	cmd := exec.Command(name, arg...)
-	var stdOut strings.Builder
-	var stdErr strings.Builder
-	cmd.Stdout = &stdOut
-	cmd.Stderr = &stdErr
+	var stdout strings.Builder
+	var stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 
-	return stdOut.String(), stdErr.String(), err
+	return stdout.String(), stderr.String(), err
 }
 
 func (agt *agent) enableUnitFile(name string) (bool, error) {
@@ -1260,15 +1260,15 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 
 	unitSettings := map[string]string{}
 	// UnitFileState=disabled
-	stdOut, stdErr, err := runCommand("systemctl", "show", name)
+	stdout, stderr, err := runCommand("systemctl", "show", name)
 	if err != nil {
-		agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl show failed")
+		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl show failed")
 		return false, err
 	}
 
 	// Settings look like this, one per line:
 	// UnitFileState=disabled
-	scanner := bufio.NewScanner(strings.NewReader(stdOut))
+	scanner := bufio.NewScanner(strings.NewReader(stdout))
 	for scanner.Scan() {
 		parts := strings.SplitN(scanner.Text(), "=", 2)
 		if len(parts) != 2 {
@@ -1289,9 +1289,9 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 
 	if unitFileState == "disabled" {
 		agt.logger.Info().Str("service_name", name).Msg("enabling systemd service")
-		stdOut, stdErr, err := runCommand("systemctl", "enable", name)
+		stdout, stderr, err := runCommand("systemctl", "enable", name)
 		if err != nil {
-			agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl enable failed")
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl enable failed")
 			return false, err
 		}
 
@@ -1318,9 +1318,9 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 
 		if activeState != "active" || subState != "running" {
 			agt.logger.Info().Str("service_name", name).Msg("starting systemd service")
-			stdOut, stdErr, err := runCommand("systemctl", "start", name)
+			stdout, stderr, err := runCommand("systemctl", "start", name)
 			if err != nil {
-				agt.logger.Err(err).Str("stdout", stdOut).Str("stderr", stdErr).Msg("systemctl start failed")
+				agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl start failed")
 				return false, err
 			}
 		}

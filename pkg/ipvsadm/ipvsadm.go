@@ -9,6 +9,9 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	"github.com/SUNET/sunet-cdn-agent/pkg/utils"
+	"github.com/rs/zerolog"
 )
 
 type virtualServiceIdentifier struct {
@@ -552,12 +555,16 @@ type IPVSUpdates struct {
 	rsToEdit   []realServerIdentifier
 }
 
-func UpdateRules(loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates) error {
+func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates) error {
 	// Delete virtual services first so any related real-servers are also removed
 	for _, vsIdent := range updates.vsToDelete {
 		for _, loadedVS := range loadedRuleSet.virtualServices {
 			if loadedVS.virtualServiceIdentifier == vsIdent {
-				fmt.Println(loadedVS.deleteString())
+				logger.Info().Str("ipvsadm_args", loadedVS.deleteString()).Msg("deleting virtual service")
+				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(loadedVS.deleteString())...)
+				if err != nil {
+					return fmt.Errorf("UpdateRules: unable to delete virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+				}
 				break
 			}
 		}
@@ -567,7 +574,11 @@ func UpdateRules(loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates)
 	for _, vsIdent := range updates.vsToAdd {
 		for _, newVS := range newRuleSet.virtualServices {
 			if newVS.virtualServiceIdentifier == vsIdent {
-				fmt.Println(newVS)
+				logger.Info().Str("ipvsadm_args", newVS.String()).Msg("adding virtual service")
+				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newVS.String())...)
+				if err != nil {
+					return fmt.Errorf("UpdateRules: unable to add virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+				}
 				break
 			}
 		}
@@ -577,7 +588,11 @@ func UpdateRules(loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates)
 	for _, vsIdent := range updates.vsToEdit {
 		for _, newVS := range newRuleSet.virtualServices {
 			if newVS.virtualServiceIdentifier == vsIdent {
-				fmt.Println(newVS.editString())
+				logger.Info().Str("ipvsadm_args", newVS.editString()).Msg("editing virtual service")
+				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newVS.editString())...)
+				if err != nil {
+					return fmt.Errorf("UpdateRules: unable to edit virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+				}
 				break
 			}
 		}
@@ -587,7 +602,11 @@ func UpdateRules(loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates)
 	for _, rsIdent := range updates.rsToDelete {
 		for _, loadedRS := range loadedRuleSet.realServers {
 			if loadedRS.realServerIdentifier == rsIdent {
-				fmt.Println(loadedRS.deleteString())
+				logger.Info().Str("ipvsadm_args", loadedRS.deleteString()).Msg("deleting real server")
+				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(loadedRS.deleteString())...)
+				if err != nil {
+					return fmt.Errorf("UpdateRules: unable to delete real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+				}
 				break
 			}
 		}
@@ -597,7 +616,11 @@ func UpdateRules(loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates)
 	for _, rsIdent := range updates.rsToAdd {
 		for _, newRS := range newRuleSet.realServers {
 			if newRS.realServerIdentifier == rsIdent {
-				fmt.Println(newRS)
+				logger.Info().Str("ipvsadm_args", newRS.String()).Msg("adding real server")
+				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newRS.String())...)
+				if err != nil {
+					return fmt.Errorf("UpdateRules: unable to add real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+				}
 				break
 			}
 		}
@@ -607,7 +630,11 @@ func UpdateRules(loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates)
 	for _, rsIdent := range updates.rsToEdit {
 		for _, newRS := range newRuleSet.realServers {
 			if newRS.realServerIdentifier == rsIdent {
-				fmt.Println(newRS.editString())
+				logger.Info().Str("ipvsadm_args", newRS.editString()).Msg("editing real server")
+				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newRS.editString())...)
+				if err != nil {
+					return fmt.Errorf("UpdateRules: unable to edit real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+				}
 				break
 			}
 		}

@@ -10,4 +10,5 @@ systemd_system_dir = "/etc/systemd/system"
 systemd_network_dir = "/etc/systemd/network"
 
 [l4lb-node]
+netns = ""
 netns_conf_dir = "/opt/sunet-cdn/l4lb/conf"

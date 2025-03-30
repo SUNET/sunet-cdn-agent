@@ -484,7 +484,35 @@ func (rset *RuleSet) AddRS(rs RealServer) error {
 	return nil
 }
 
-func ParseRules(rules string) (RuleSet, error) {
+func GetLoadedRules(logger zerolog.Logger, netns string) (RuleSet, error) {
+	// If netns is empty we call ipvsadm directly, otherwise we wrap it in "ip netns exec <netns>"
+	var commandName string
+	ipvsadmArgs := []string{"--save", "--numeric"}
+	var args []string
+	if netns == "" {
+		commandName = "ipvsadm"
+		args = ipvsadmArgs
+	} else {
+		commandName = "ip"
+		ipArgs := []string{"netns", "exec", netns, "ipvsadm"}
+		args = append(ipArgs, ipvsadmArgs...)
+	}
+
+	stdout, stderr, err := utils.RunCommand(commandName, args...)
+	if err != nil {
+		logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("command", commandName).Strs("args", args).Msg("loading rules failed")
+		return RuleSet{}, fmt.Errorf("unable to get loaded ipvsadm rules: %w", err)
+	}
+
+	loadedIPVSRules, err := parseRules(stdout)
+	if err != nil {
+		return RuleSet{}, fmt.Errorf("unable to parse ipvsadm output: %w", err)
+	}
+
+	return loadedIPVSRules, nil
+}
+
+func parseRules(rules string) (RuleSet, error) {
 	// Use slices for ordering
 	virtualServices := []VirtualService{}
 	realServers := []RealServer{}
@@ -555,13 +583,25 @@ type IPVSUpdates struct {
 	rsToEdit   []realServerIdentifier
 }
 
-func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates) error {
+func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates) error {
+	// If netns is empty we call ipvsadm directly, otherwise we wrap it in "ip netns exec <netns>"
+	var commandName string
+	ipArgs := []string{}
+	if netns == "" {
+		commandName = "ipvsadm"
+	} else {
+		commandName = "ip"
+		ipArgs = []string{"netns", "exec", netns, "ipvsadm"}
+	}
+
 	// Delete virtual services first so any related real-servers are also removed
 	for _, vsIdent := range updates.vsToDelete {
 		for _, loadedVS := range loadedRuleSet.virtualServices {
 			if loadedVS.virtualServiceIdentifier == vsIdent {
-				logger.Info().Str("ipvsadm_args", loadedVS.deleteString()).Msg("deleting virtual service")
-				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(loadedVS.deleteString())...)
+				ipvsadmArgs := strings.Fields(loadedVS.deleteString())
+				args := append(ipArgs, ipvsadmArgs...)
+				logger.Info().Str("command", commandName).Strs("args", args).Msg("deleting virtual service")
+				stdout, stderr, err := utils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to delete virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -574,8 +614,10 @@ func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSe
 	for _, vsIdent := range updates.vsToAdd {
 		for _, newVS := range newRuleSet.virtualServices {
 			if newVS.virtualServiceIdentifier == vsIdent {
-				logger.Info().Str("ipvsadm_args", newVS.String()).Msg("adding virtual service")
-				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newVS.String())...)
+				ipvsadmArgs := strings.Fields(newVS.String())
+				args := append(ipArgs, ipvsadmArgs...)
+				logger.Info().Str("command", commandName).Strs("args", args).Msg("adding virtual service")
+				stdout, stderr, err := utils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to add virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -588,8 +630,10 @@ func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSe
 	for _, vsIdent := range updates.vsToEdit {
 		for _, newVS := range newRuleSet.virtualServices {
 			if newVS.virtualServiceIdentifier == vsIdent {
-				logger.Info().Str("ipvsadm_args", newVS.editString()).Msg("editing virtual service")
-				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newVS.editString())...)
+				ipvsadmArgs := strings.Fields(newVS.editString())
+				args := append(ipArgs, ipvsadmArgs...)
+				logger.Info().Str("command", commandName).Strs("args", args).Msg("editing virtual service")
+				stdout, stderr, err := utils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to edit virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -602,8 +646,10 @@ func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSe
 	for _, rsIdent := range updates.rsToDelete {
 		for _, loadedRS := range loadedRuleSet.realServers {
 			if loadedRS.realServerIdentifier == rsIdent {
-				logger.Info().Str("ipvsadm_args", loadedRS.deleteString()).Msg("deleting real server")
-				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(loadedRS.deleteString())...)
+				ipvsadmArgs := strings.Fields(loadedRS.deleteString())
+				args := append(ipArgs, ipvsadmArgs...)
+				logger.Info().Str("command", commandName).Strs("args", args).Msg("deleting real server")
+				stdout, stderr, err := utils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to delete real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -616,8 +662,10 @@ func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSe
 	for _, rsIdent := range updates.rsToAdd {
 		for _, newRS := range newRuleSet.realServers {
 			if newRS.realServerIdentifier == rsIdent {
-				logger.Info().Str("ipvsadm_args", newRS.String()).Msg("adding real server")
-				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newRS.String())...)
+				ipvsadmArgs := strings.Fields(newRS.String())
+				args := append(ipArgs, ipvsadmArgs...)
+				logger.Info().Str("command", commandName).Strs("args", args).Msg("adding real server")
+				stdout, stderr, err := utils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to add real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -630,8 +678,10 @@ func UpdateRules(logger zerolog.Logger, loadedRuleSet RuleSet, newRuleSet RuleSe
 	for _, rsIdent := range updates.rsToEdit {
 		for _, newRS := range newRuleSet.realServers {
 			if newRS.realServerIdentifier == rsIdent {
-				logger.Info().Str("ipvsadm_args", newRS.editString()).Msg("editing real server")
-				stdout, stderr, err := utils.RunCommand("ipvsadm", strings.Fields(newRS.editString())...)
+				ipvsadmArgs := strings.Fields(newRS.editString())
+				args := append(ipArgs, ipvsadmArgs...)
+				logger.Info().Str("command", commandName).Strs("args", args).Msg("editing real server")
+				stdout, stderr, err := utils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to edit real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}

@@ -54,6 +54,7 @@ type confWriterSettings struct {
 }
 
 type l4lbNodeSettings struct {
+	NetNS        string `mapstructure:"netns"`
 	NetNSConfDir string `mapstructure:"netns_conf_dir" validate:"required"`
 }
 
@@ -1114,20 +1115,14 @@ func (agt *agent) setupIpvsadm(lnc types.L4LBNodeConfig, l4lbConfPath string) er
 	// --clear" followed by "ipvsadm --restore" but clearing out all
 	// existing rules is not great since it would cause a glitch for all
 	// services.
-	stdout, stderr, err := utils.RunCommand("ipvsadm", "--save", "--numeric")
+	loadedIPVSRules, err := ipvsadm.GetLoadedRules(agt.logger, agt.conf.L4LBNode.NetNS)
 	if err != nil {
-		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("ipvsadm --save --numeric failed")
-		return fmt.Errorf("unable to run ipvsadm --save --numeric: %w", err)
-	}
-
-	loadedIPVSRules, err := ipvsadm.ParseRules(stdout)
-	if err != nil {
-		return fmt.Errorf("unable to parse ipvsadm output: %w", err)
+		return fmt.Errorf("unable to load ipvsadm rules: %w", err)
 	}
 
 	updates := ipvsadm.FindRuleUpdates(loadedIPVSRules, newIPVSRules)
 
-	err = ipvsadm.UpdateRules(agt.logger, loadedIPVSRules, newIPVSRules, updates)
+	err = ipvsadm.UpdateRules(agt.logger, agt.conf.L4LBNode.NetNS, loadedIPVSRules, newIPVSRules, updates)
 	if err != nil {
 		return fmt.Errorf("unable to update loaded ipvsadm rules: %w", err)
 	}

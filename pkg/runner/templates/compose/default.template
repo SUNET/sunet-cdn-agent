@@ -48,7 +48,7 @@ services:
     # We build our own varnish with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so
     # it is retained in case of a restart of the container or machine.
-    image: "platform.sunet.se/sunet-cdn/cdn-varnish:af7f7d11e61acf9f6113811615d1baa46daf3bd1"
+    image: "platform.sunet.se/sunet-cdn/cdn-varnish@sha256:248b1ca861f1a8bb548845b656526210ef7015ba71c0e264dc4619da16407b40"
     # Varnish uses a different UID but the same group ID as is used for haproxy
     # so they can share some files like unix sockets.
     user: {{.VarnishUID}}:{{.GID}}

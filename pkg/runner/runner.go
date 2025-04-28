@@ -1241,15 +1241,15 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	// processes related to a given service will use config
 	// for the same version when they come up again after
 	// reboot.
+	orgPath := filepath.Join(cacheConfPath, "orgs")
+	err = agt.createDirPathIfNeeded(orgPath, 0, 0, 0o700)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create orgs dir")
+		return
+	}
+
 	for _, orgUUID := range orderedOrgs {
 		org := cnc.Orgs[orgUUID]
-
-		orgPath := filepath.Join(cacheConfPath, "orgs")
-		err = agt.createDirPathIfNeeded(orgPath, 0, 0, 0o700)
-		if err != nil {
-			agt.logger.Err(err).Msg("unable to create orgs dir")
-			return
-		}
 
 		orgIDPath := filepath.Join(orgPath, org.ID.String())
 		err = agt.createDirPathIfNeeded(orgIDPath, 0, 0, 0o700)

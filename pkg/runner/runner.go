@@ -1149,6 +1149,149 @@ func (agt *agent) generateL4LBFiles(lnc types.L4LBNodeConfig) {
 	}
 }
 
+func (agt *agent) getExistingOrgsAndServices(orgPath string) (map[pgtype.UUID]map[pgtype.UUID]struct{}, error) {
+	existingOrgIDs := map[pgtype.UUID]map[pgtype.UUID]struct{}{}
+	orgDirEntries, err := os.ReadDir(orgPath)
+	if err != nil {
+		return nil, err
+		//}
+	}
+
+	for _, orgDirEntry := range orgDirEntries {
+		orgID := new(pgtype.UUID)
+		err := orgID.Scan(orgDirEntry.Name())
+		if err != nil {
+			agt.logger.Info().Str("filename", orgDirEntry.Name()).Msg("skipping cleanup of non-UUID org filename")
+			continue
+		}
+
+		if !orgID.Valid {
+			agt.logger.Info().Str("filename", orgDirEntry.Name()).Msg("skipping cleanup of invalid org UUID filename")
+			continue
+		}
+
+		existingOrgIDs[*orgID] = map[pgtype.UUID]struct{}{}
+
+		orgIDPath := getOrgIDPath(orgPath, *orgID)
+		servicePath := getServicePath(orgIDPath)
+
+		serviceDirEntries, err := os.ReadDir(servicePath)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return nil, err
+			}
+		}
+
+		for _, serviceDirEntry := range serviceDirEntries {
+			serviceID := new(pgtype.UUID)
+			err := serviceID.Scan(serviceDirEntry.Name())
+			if err != nil {
+				agt.logger.Info().Str("filename", serviceDirEntry.Name()).Msg("skipping cleanup of non-UUID service filename")
+				continue
+			}
+
+			if !serviceID.Valid {
+				agt.logger.Info().Str("filename", serviceDirEntry.Name()).Msg("skipping cleanup of invalid service UUID filename")
+				continue
+			}
+			existingOrgIDs[*orgID][*serviceID] = struct{}{}
+		}
+	}
+
+	return existingOrgIDs, nil
+}
+
+func (agt *agent) cleanUpService(orgPath string, orgID pgtype.UUID, serviceID pgtype.UUID) error {
+	systemdBaseName, systemdFileName := agt.genSystemdFilenames(orgID, serviceID)
+
+	unitSettings, err := agt.systemctlShow(systemdBaseName)
+	if err != nil {
+		return err
+	}
+
+	loadStateKey := "LoadState"
+	loadState, ok := unitSettings[loadStateKey]
+	if !ok {
+		agt.logger.Error().Str("setting_key", loadStateKey).Msg("unable to locate unit setting")
+		return fmt.Errorf("unable to locate unit setting")
+	}
+
+	if loadState == "loaded" {
+		agt.logger.Info().Str("org_id", orgID.String()).Str("serviceID", serviceID.String()).Str("systemd_basename", systemdBaseName).Msg("removing systemd for service")
+		stdout, stderr, err := utils.RunCommand("systemctl", "disable", systemdBaseName)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("pattern", systemdBaseName).Msg("systemctl disable failed")
+			return err
+		}
+
+		stdout, stderr, err = utils.RunCommand("systemctl", "stop", systemdBaseName)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("pattern", systemdBaseName).Msg("systemctl stop failed")
+			return err
+		}
+
+		err = os.Remove(systemdFileName)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("filename", systemdFileName).Msg("removal of systemd filename failed")
+			return err
+		}
+
+		err = agt.systemctlDaemonReload()
+		if err != nil {
+			return err
+		}
+
+		// Not sure we should do this, this will only cleanup things that broke during stop, maybe it is better to leave it so it can be inspected:
+		//stdout, stderr, err = utils.RunCommand("systemctl", "reset-failed", systemdBaseName)
+		//if err != nil {
+		//	agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("pattern", systemdBaseName).Msg("systemctl reset-failed failed")
+		//	return err
+		//}
+	}
+
+	orgIDPath := getOrgIDPath(orgPath, orgID)
+	servicePath := getServicePath(orgIDPath)
+	serviceIDPath := getServiceIDPath(servicePath, serviceID)
+
+	agt.logger.Info().Str("service_id_path", serviceIDPath).Msg("cleaning up files for removed service")
+	err = os.RemoveAll(serviceIDPath)
+	if err != nil {
+		agt.logger.Err(err).Str("service_id_path", serviceIDPath).Msg("failed cleaning up files for removed service")
+	}
+
+	return nil
+}
+
+func cmpUUID(a pgtype.UUID, b pgtype.UUID) int {
+	switch {
+	case a.String() < b.String():
+		return -1
+	case a.String() > b.String():
+		return 1
+	}
+
+	return 0
+}
+
+func (agt *agent) genSystemdFilenames(orgID pgtype.UUID, serviceID pgtype.UUID) (string, string) {
+	systemdBaseName := fmt.Sprintf("sunet-cdn-agent_%s_%s.service", orgID, serviceID)
+	systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, systemdBaseName)
+
+	return systemdBaseName, systemdFile
+}
+
+func getOrgIDPath(orgPath string, orgID pgtype.UUID) string {
+	return filepath.Join(orgPath, orgID.String())
+}
+
+func getServicePath(orgIDPath string) string {
+	return filepath.Join(orgIDPath, "services")
+}
+
+func getServiceIDPath(servicePath string, serviceID pgtype.UUID) string {
+	return filepath.Join(servicePath, serviceID.String())
+}
+
 func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	cacheConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "cache-conf")
 	err := agt.createDirPathIfNeeded(cacheConfPath, 0, 0, 0o700)
@@ -1248,10 +1391,63 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 		return
 	}
 
+	// Find all existing orgs and services
+	existingOrgIDs, err := agt.getExistingOrgsAndServices(orgPath)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to inventory orgs dir")
+		return
+	}
+
+	orderedExistingOrgIDs := []pgtype.UUID{}
+	for existingOrgID := range existingOrgIDs {
+		orderedExistingOrgIDs = append(orderedExistingOrgIDs, existingOrgID)
+	}
+	slices.SortFunc(orderedExistingOrgIDs, cmpUUID)
+
+	for _, orderedExistingOrgID := range orderedExistingOrgIDs {
+		orderedExistingServiceIDs := []pgtype.UUID{}
+		for existingServiceID := range existingOrgIDs[orderedExistingOrgID] {
+			orderedExistingServiceIDs = append(orderedExistingServiceIDs, existingServiceID)
+		}
+		slices.SortFunc(orderedExistingServiceIDs, cmpUUID)
+
+		if _, ok := cnc.Orgs[orderedExistingOrgID.String()]; !ok {
+			agt.logger.Info().Str("org_id", orderedExistingOrgID.String()).Msg("found orphaned org ID on disk")
+
+			// Remove all services for the org and then the org dir itself
+			for _, orderedExistingServiceID := range orderedExistingServiceIDs {
+				err = agt.cleanUpService(orgPath, orderedExistingOrgID, orderedExistingServiceID)
+				if err != nil {
+					agt.logger.Err(err).Str("org_id", orderedExistingOrgID.String()).Str("service_id", orderedExistingServiceID.String()).Msg("unable to cleanup service for orphaned org")
+					return
+				}
+			}
+
+			orgIDPath := getOrgIDPath(orgPath, orderedExistingOrgID)
+			agt.logger.Info().Str("org_id_path", orgIDPath).Msg("cleaning up files for orphaned org")
+			err = os.RemoveAll(orgIDPath)
+			if err != nil {
+				agt.logger.Err(err).Str("org_id_path", orgIDPath).Msg("failed cleaning up files for orphaned org")
+			}
+		} else {
+			for _, orderedExistingServiceID := range orderedExistingServiceIDs {
+				if _, ok := cnc.Orgs[orderedExistingOrgID.String()].Services[orderedExistingServiceID.String()]; !ok {
+					agt.logger.Info().Str("service_id", orderedExistingServiceID.String()).Msg("found orphaned service ID on disk")
+
+					err = agt.cleanUpService(orgPath, orderedExistingOrgID, orderedExistingServiceID)
+					if err != nil {
+						agt.logger.Err(err).Str("org_id", orderedExistingOrgID.String()).Str("service_id", orderedExistingServiceID.String()).Msg("unable to cleanup service")
+						return
+					}
+				}
+			}
+		}
+	}
+
 	for _, orgUUID := range orderedOrgs {
 		org := cnc.Orgs[orgUUID]
 
-		orgIDPath := filepath.Join(orgPath, org.ID.String())
+		orgIDPath := getOrgIDPath(orgPath, org.ID)
 		err = agt.createDirPathIfNeeded(orgIDPath, 0, 0, 0o700)
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to create orgs ID dir")
@@ -1273,14 +1469,14 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 			haProxyUID := service.UIDRangeFirst + 1
 			varnishUID := service.UIDRangeFirst + 2
 
-			servicePath := filepath.Join(orgIDPath, "services")
+			servicePath := getServicePath(orgIDPath)
 			err = agt.createDirPathIfNeeded(servicePath, 0, int(commonGID), 0o700)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create service dir")
 				return
 			}
 
-			serviceIDPath := filepath.Join(servicePath, service.ID.String())
+			serviceIDPath := getServiceIDPath(servicePath, service.ID)
 			err = agt.createDirPathIfNeeded(serviceIDPath, 0, int(commonGID), 0o750)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create service ID dir")
@@ -1475,8 +1671,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 					return
 				}
 
-				systemdBaseName := fmt.Sprintf("sunet-cdn-agent_%s_%s.service", org.ID, service.ID)
-				systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, systemdBaseName)
+				systemdBaseName, systemdFile := agt.genSystemdFilenames(org.ID, service.ID)
 				modified, err := agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build compose file")
@@ -1499,10 +1694,8 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	agt.reloadContainerConfigs(modifiedActiveLinks, modifiedCerts)
 
 	if len(modifiedSystemdServices) > 0 {
-		agt.logger.Info().Msg("calling systemctl deamon-reload")
-		stdout, stderr, err := utils.RunCommand("systemctl", "daemon-reload")
+		err = agt.systemctlDaemonReload()
 		if err != nil {
-			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl deamon-reload failed")
 			return
 		}
 
@@ -1565,15 +1758,12 @@ func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls 
 	}
 }
 
-func (agt *agent) enableUnitFile(name string) (bool, error) {
-	modified := false
-
+func (agt *agent) systemctlShow(pattern string) (map[string]string, error) {
 	unitSettings := map[string]string{}
-	// UnitFileState=disabled
-	stdout, stderr, err := utils.RunCommand("systemctl", "show", name)
+	stdout, stderr, err := utils.RunCommand("systemctl", "show", pattern)
 	if err != nil {
 		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl show failed")
-		return false, err
+		return nil, err
 	}
 
 	// Settings look like this, one per line:
@@ -1582,12 +1772,34 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 	for scanner.Scan() {
 		parts := strings.SplitN(scanner.Text(), "=", 2)
 		if len(parts) != 2 {
-			return false, fmt.Errorf("expected two parts, got %d: %s", len(parts), parts)
+			return nil, fmt.Errorf("expected two parts, got %d: %s", len(parts), parts)
 		}
 		unitSettings[parts[0]] = parts[1]
 	}
 	if err := scanner.Err(); err != nil {
-		agt.logger.Err(err).Msgf("reading output from 'systemctl show %s", name)
+		agt.logger.Err(err).Str("pattern", pattern).Msg("reading output from 'systemctl show'")
+	}
+
+	return unitSettings, nil
+}
+
+func (agt *agent) systemctlDaemonReload() error {
+	agt.logger.Info().Msg("calling systemctl daemon-reload")
+	stdout, stderr, err := utils.RunCommand("systemctl", "daemon-reload")
+	if err != nil {
+		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl daamon-reload failed")
+		return err
+	}
+
+	return nil
+}
+
+func (agt *agent) enableUnitFile(name string) (bool, error) {
+	modified := false
+
+	unitSettings, err := agt.systemctlShow(name)
+	if err != nil {
+		return false, err
 	}
 
 	unitFileStateKey := "UnitFileState"

@@ -1470,7 +1470,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 			varnishUID := service.UIDRangeFirst + 2
 
 			servicePath := getServicePath(orgIDPath)
-			err = agt.createDirPathIfNeeded(servicePath, 0, int(commonGID), 0o700)
+			err = agt.createDirPathIfNeeded(servicePath, 0, 0, 0o700)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create service dir")
 				return
@@ -1489,6 +1489,13 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 				orderedVersions = append(orderedVersions, versionNumber)
 			}
 			slices.Sort(orderedVersions)
+
+			composePath := filepath.Join(serviceIDPath, "compose")
+			err = agt.createDirPathIfNeeded(composePath, 0, 0, 0o700)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create compose dir")
+				return
+			}
 
 			volumesPath := filepath.Join(serviceIDPath, "volumes")
 			err = agt.createDirPathIfNeeded(volumesPath, 0, int(commonGID), 0o750)
@@ -1616,9 +1623,6 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 
 			dirsToCreateIfNeeded := []string{}
 
-			composeBasePath := filepath.Join(servicePath, "compose")
-			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, composeBasePath)
-
 			certsPath := filepath.Join(volumesPath, "certs")
 			dirsToCreateIfNeeded = append(dirsToCreateIfNeeded, certsPath)
 
@@ -1649,7 +1653,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 				return
 			}
 
-			composeFile := filepath.Join(composeBasePath, "docker-compose.yml")
+			composeFile := filepath.Join(composePath, "docker-compose.yml")
 			_, err = agt.createOrUpdateFile(composeFile, 0, 0, 0o600, cacheCompose)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to build compose file")

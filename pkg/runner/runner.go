@@ -524,6 +524,7 @@ func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid 
 			agt.logger.Info().Str("path", path).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("new UID does not fit in uint32")
 			return fmt.Errorf("uid %d does not fit in uint32", uid)
 		}
+		// #nosec G115 -- seems gosec still detects this as overflow because of the int64(uid) usage above
 		if s.Uid != uint32(uid) {
 			agt.logger.Info().Str("path", path).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("updating file UID")
 			chownNeeded = true
@@ -533,6 +534,7 @@ func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid 
 			agt.logger.Info().Str("path", path).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("new GID does not fit in uint32")
 			return fmt.Errorf("gid %d does not fit in uint32", uid)
 		}
+		// #nosec G115 -- seems gosec still detects this as overflow because of the int64(gid) usage above
 		if s.Gid != uint32(gid) {
 			agt.logger.Info().Str("path", path).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("updating file GID")
 			chownNeeded = true

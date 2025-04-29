@@ -520,7 +520,7 @@ func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid 
 	if s, ok := fileInfo.Sys().(*syscall.Stat_t); ok {
 		chownNeeded := false
 
-		if uid < 0 || uid > math.MaxUint32 {
+		if uid < 0 || int64(uid) > math.MaxUint32 {
 			agt.logger.Info().Str("path", path).Uint32("old_uid", s.Uid).Int("new_uid", uid).Msg("new UID does not fit in uint32")
 			return fmt.Errorf("uid %d does not fit in uint32", uid)
 		}
@@ -529,7 +529,7 @@ func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid 
 			chownNeeded = true
 		}
 
-		if gid < 0 || gid > math.MaxUint32 {
+		if gid < 0 || int64(gid) > math.MaxUint32 {
 			agt.logger.Info().Str("path", path).Uint32("old_gid", s.Gid).Int("new_gid", gid).Msg("new GID does not fit in uint32")
 			return fmt.Errorf("gid %d does not fit in uint32", uid)
 		}

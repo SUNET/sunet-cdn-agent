@@ -9,6 +9,7 @@ services:
       - {{.CertsDir}}:/certs:ro
       - {{.CertsPrivateDir}}:/certs-private:ro
       - {{.HAProxyStatsDir}}:/haproxy-stats
+      - {{.HAProxyLocalDir}}:/haproxy-local
     # Override default Cmd since we have the "active" symlink indirection to
     # reach the configuration
     command: [

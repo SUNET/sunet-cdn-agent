@@ -360,6 +360,7 @@ type cacheComposeConfig struct {
 	SharedDir       string
 	CertsDir        string
 	HAProxyStatsDir string
+	HAProxyLocalDir string
 	CertsPrivateDir string
 	HAProxyUID      int64
 	VarnishUID      int64
@@ -1539,6 +1540,13 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 				return
 			}
 
+			haproxyLocalPath := filepath.Join(volumesPath, "haproxy-local")
+			err = agt.createDirPathIfNeeded(haproxyLocalPath, int(haProxyUID), 0, 0o700)
+			if err != nil {
+				agt.logger.Err(err).Str("path", haproxyLocalPath).Msg("unable to create haproxy-local dir")
+				return
+			}
+
 			// Do initial loop over all versions to figure out if
 			// TLS is required for any service version origin. If
 			// this is the case we need to make sure we have access
@@ -1641,6 +1649,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 				SharedDir:       sharedPath,
 				CertsDir:        certsPath,
 				HAProxyStatsDir: haproxyStatsPath,
+				HAProxyLocalDir: haproxyLocalPath,
 				CertsPrivateDir: certsPrivatePath,
 				HAProxyUID:      haProxyUID,
 				VarnishUID:      varnishUID,

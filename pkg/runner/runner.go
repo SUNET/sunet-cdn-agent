@@ -34,6 +34,10 @@ import (
 	"github.com/spf13/viper"
 )
 
+const (
+	nodeTypeCache = "cache"
+)
+
 type config struct {
 	Manager    managerSettings
 	ConfWriter confWriterSettings
@@ -793,8 +797,8 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	// the active link points to a new version
 	// Expected output is something like this:
 	// ===
-	// sunet-cdn-agent-cache-7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
-	// sunet-cdn-agent-cache-7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-varnish-1
+	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
+	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-varnish-1
 	// ===
 	stdout, stderr, err := utils.RunCommand("docker", "ps", "--format", "{{.Names}}")
 	if err != nil {
@@ -802,7 +806,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		return
 	}
 
-	containerPrefix := "sunet-cdn-agent-cache-"
+	containerPrefix := fmt.Sprintf("sunet-cdn-agent_%s_", nodeTypeCache)
 	uuidLen := 36
 	containerNameScanner := bufio.NewScanner(strings.NewReader(stdout))
 
@@ -1205,7 +1209,7 @@ func (agt *agent) getExistingOrgsAndServices(orgPath string) (map[pgtype.UUID]ma
 }
 
 func (agt *agent) cleanUpService(orgPath string, orgID pgtype.UUID, serviceID pgtype.UUID) error {
-	systemdBaseName, systemdFileName := agt.genSystemdFilenames(orgID, serviceID)
+	systemdBaseName, systemdFileName := agt.genSystemdFilenames(nodeTypeCache, orgID, serviceID)
 
 	unitSettings, err := agt.systemctlShow(systemdBaseName)
 	if err != nil {
@@ -1276,8 +1280,8 @@ func cmpUUID(a pgtype.UUID, b pgtype.UUID) int {
 	return 0
 }
 
-func (agt *agent) genSystemdFilenames(orgID pgtype.UUID, serviceID pgtype.UUID) (string, string) {
-	systemdBaseName := fmt.Sprintf("sunet-cdn-agent_%s_%s.service", orgID, serviceID)
+func (agt *agent) genSystemdFilenames(nodeType string, orgID pgtype.UUID, serviceID pgtype.UUID) (string, string) {
+	systemdBaseName := fmt.Sprintf("sunet-cdn-agent_%s_%s_%s.service", nodeType, orgID, serviceID)
 	systemdFile := filepath.Join(agt.conf.ConfWriter.SystemdSystemDir, systemdBaseName)
 
 	return systemdBaseName, systemdFile
@@ -1686,7 +1690,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 					return
 				}
 
-				systemdBaseName, systemdFile := agt.genSystemdFilenames(org.ID, service.ID)
+				systemdBaseName, systemdFile := agt.genSystemdFilenames(nodeTypeCache, org.ID, service.ID)
 				modified, err := agt.createOrUpdateFile(systemdFile, 0, 0, 0o644, cacheService)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build compose file")

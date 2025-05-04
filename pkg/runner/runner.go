@@ -36,6 +36,7 @@ import (
 
 const (
 	nodeTypeCache = "cache"
+	vclFilename   = "sunet-cdn.vcl"
 )
 
 type config struct {
@@ -742,7 +743,7 @@ func (agt *agent) loadNewVcl(containerName string) error {
 		return err
 	}
 
-	stdout, stderr, err = utils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, "/service-versions/active/varnish/default.vcl")
+	stdout, stderr, err = utils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, vclFilename)
 	if err != nil {
 		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.load")
 		return err
@@ -1375,9 +1376,9 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	modifiedCerts := map[string]map[string]struct{}{}
 
 	// Expected directory structure:
-	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/default.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/sunet-cdn.vcl
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/haproxy/haproxy.cfg
-	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/default.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/sunet-cdn.vcl
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/haproxy/haproxy.cfg
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/active -> 2
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/work
@@ -1600,7 +1601,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 					return
 				}
 
-				varnishVCLFile := filepath.Join(varnishPath, "default.vcl")
+				varnishVCLFile := filepath.Join(varnishPath, vclFilename)
 				_, err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")

@@ -76,8 +76,10 @@ services:
       "/usr/lib/varnish/vmods/libvmod_slash.so",
       "-a",
       "/shared/unix-sockets/varnish,PROXY,mode=660",
+      "-p",
+      "vcl_path=/service-versions/active/varnish",
       "-f",
-      "/service-versions/active/varnish/default.vcl",
+      "sunet-cdn.vcl",
       "-p",
       "feature=+http2",
       "-s",
@@ -85,7 +87,7 @@ services:
       "-p",
       "vcc_feature=none,+err_unref",
       "-r",
-      "cc_command,syslog_cli_traffic,vcc_allow_inline_c,vcc_feature,vcc_unsafe_path,vmod_path",
+      "cc_command,syslog_cli_traffic,vcc_allow_inline_c,vcc_feature,vcc_unsafe_path,vcl_path,vmod_path",
     ]
     # Allow io_uring operations expected by slash fellow.
     security_opt:

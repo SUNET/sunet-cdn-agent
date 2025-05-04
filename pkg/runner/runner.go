@@ -500,8 +500,23 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) (bool, e
 			// link.
 			agt.logger.Info().Str("old", lnDest).Str("new", activeVersion).Msg("updating active link")
 			lnTmpPath := lnPath + ".tmp"
+
+			// Make sure there is no leftover .tmp file from a
+			// crash that will make the symlink creation fail
+			err := os.Remove(lnTmpPath)
+			if err != nil {
+				// The file not existing is the expected result
+				if !errors.Is(err, fs.ErrNotExist) {
+					agt.logger.Err(err).Str("path", lnPath).Msg("unable to cleanup previous temporary symlink")
+					return false, err
+				}
+			} else {
+				// Huh, turns out there was actually a leftover file to remove
+				agt.logger.Info().Str("path", lnPath).Msg("cleaned up old temporary symlink")
+			}
+
 			agt.logger.Info().Str("dest", activeVersion).Str("path", lnTmpPath).Msg("creating replacement symlink")
-			err := os.Symlink(activeVersion, lnTmpPath)
+			err = os.Symlink(activeVersion, lnTmpPath)
 			if err != nil {
 				agt.logger.Err(err).Str("path", lnPath).Msg("unable to create temporary symlink")
 				return false, err

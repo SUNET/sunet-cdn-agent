@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/SUNET/sunet-cdn-agent/pkg/utils"
+	"github.com/SUNET/sunet-cdn-agent/pkg/agentutils"
 	"github.com/rs/zerolog"
 )
 
@@ -498,7 +498,7 @@ func GetLoadedRules(logger zerolog.Logger, netns string) (RuleSet, error) {
 		args = append(ipArgs, ipvsadmArgs...)
 	}
 
-	stdout, stderr, err := utils.RunCommand(commandName, args...)
+	stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 	if err != nil {
 		logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("command", commandName).Strs("args", args).Msg("loading rules failed")
 		return RuleSet{}, fmt.Errorf("unable to get loaded ipvsadm rules: %w", err)
@@ -601,7 +601,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 				ipvsadmArgs := strings.Fields(loadedVS.deleteString())
 				args := append(ipArgs, ipvsadmArgs...)
 				logger.Info().Str("command", commandName).Strs("args", args).Msg("deleting virtual service")
-				stdout, stderr, err := utils.RunCommand(commandName, args...)
+				stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to delete virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -617,7 +617,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 				ipvsadmArgs := strings.Fields(newVS.String())
 				args := append(ipArgs, ipvsadmArgs...)
 				logger.Info().Str("command", commandName).Strs("args", args).Msg("adding virtual service")
-				stdout, stderr, err := utils.RunCommand(commandName, args...)
+				stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to add virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -633,7 +633,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 				ipvsadmArgs := strings.Fields(newVS.editString())
 				args := append(ipArgs, ipvsadmArgs...)
 				logger.Info().Str("command", commandName).Strs("args", args).Msg("editing virtual service")
-				stdout, stderr, err := utils.RunCommand(commandName, args...)
+				stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to edit virtual-service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -649,7 +649,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 				ipvsadmArgs := strings.Fields(loadedRS.deleteString())
 				args := append(ipArgs, ipvsadmArgs...)
 				logger.Info().Str("command", commandName).Strs("args", args).Msg("deleting real server")
-				stdout, stderr, err := utils.RunCommand(commandName, args...)
+				stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to delete real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -665,7 +665,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 				ipvsadmArgs := strings.Fields(newRS.String())
 				args := append(ipArgs, ipvsadmArgs...)
 				logger.Info().Str("command", commandName).Strs("args", args).Msg("adding real server")
-				stdout, stderr, err := utils.RunCommand(commandName, args...)
+				stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to add real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}
@@ -681,7 +681,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 				ipvsadmArgs := strings.Fields(newRS.editString())
 				args := append(ipArgs, ipvsadmArgs...)
 				logger.Info().Str("command", commandName).Strs("args", args).Msg("editing real server")
-				stdout, stderr, err := utils.RunCommand(commandName, args...)
+				stdout, stderr, err := agentutils.RunCommand(commandName, args...)
 				if err != nil {
 					return fmt.Errorf("UpdateRules: unable to edit real-server, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
 				}

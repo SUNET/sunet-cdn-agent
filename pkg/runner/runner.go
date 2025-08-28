@@ -25,8 +25,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/SUNET/sunet-cdn-agent/pkg/agentutils"
 	"github.com/SUNET/sunet-cdn-agent/pkg/ipvsadm"
-	"github.com/SUNET/sunet-cdn-agent/pkg/utils"
 	"github.com/SUNET/sunet-cdn-manager/pkg/types"
 	"github.com/go-playground/validator/v10"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -716,7 +716,7 @@ func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}
 }
 
 func (agt *agent) loadNewVcl(containerName string) error {
-	stdout, stderr, err := utils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
+	stdout, stderr, err := agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
 	if err != nil {
 		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.list -j")
 		return err
@@ -758,13 +758,13 @@ func (agt *agent) loadNewVcl(containerName string) error {
 		return err
 	}
 
-	stdout, stderr, err = utils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, vclFilename)
+	stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, vclFilename)
 	if err != nil {
 		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.load")
 		return err
 	}
 
-	stdout, stderr, err = utils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
+	stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
 	if err != nil {
 		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.use")
 		return err
@@ -785,7 +785,7 @@ func (agt *agent) loadNewVcl(containerName string) error {
 				Str("vcl_status", lv.Status).
 				Int64("vcl_busy", lv.Busy).
 				Msg("discarding unused vcl")
-			stdout, stderr, err = utils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
+			stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
 			if err != nil {
 				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.discard")
 				return err
@@ -799,7 +799,7 @@ func (agt *agent) loadNewVcl(containerName string) error {
 func (agt *agent) reloadHAProxy(containerName string) error {
 	// HAProxy in master-worker mode will do a seamless reload if sent SIGUSR2
 	// https://docs.haproxy.org/2.9/configuration.html#3.1-master-worker
-	stdout, stderr, err := utils.RunCommand("docker", "kill", "--signal", "USR2", containerName)
+	stdout, stderr, err := agentutils.RunCommand("docker", "kill", "--signal", "USR2", containerName)
 	if err != nil {
 		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to send SIGUSR2 to haproxy")
 		return err
@@ -816,7 +816,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
 	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-varnish-1
 	// ===
-	stdout, stderr, err := utils.RunCommand("docker", "ps", "--format", "{{.Names}}")
+	stdout, stderr, err := agentutils.RunCommand("docker", "ps", "--format", "{{.Names}}")
 	if err != nil {
 		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("docker ps failed")
 		return
@@ -985,7 +985,7 @@ func (agt *agent) setupNetNS(lnc types.L4LBNodeConfig) error {
 	if netNSModified {
 		args := []string{"systemctl", "restart", "sunet-l4lb-namespace.service"}
 		agt.logger.Info().Strs("cmd", args).Msg("running command")
-		stdout, stderr, err := utils.RunCommand(args[0], args[1:]...)
+		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
 		if err != nil {
 			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
 		}
@@ -1241,13 +1241,13 @@ func (agt *agent) cleanUpService(orgPath string, orgID pgtype.UUID, serviceID pg
 
 	if loadState == "loaded" {
 		agt.logger.Info().Str("org_id", orgID.String()).Str("serviceID", serviceID.String()).Str("systemd_basename", systemdBaseName).Msg("removing systemd for service")
-		stdout, stderr, err := utils.RunCommand("systemctl", "disable", systemdBaseName)
+		stdout, stderr, err := agentutils.RunCommand("systemctl", "disable", systemdBaseName)
 		if err != nil {
 			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("pattern", systemdBaseName).Msg("systemctl disable failed")
 			return err
 		}
 
-		stdout, stderr, err = utils.RunCommand("systemctl", "stop", systemdBaseName)
+		stdout, stderr, err = agentutils.RunCommand("systemctl", "stop", systemdBaseName)
 		if err != nil {
 			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("pattern", systemdBaseName).Msg("systemctl stop failed")
 			return err
@@ -1265,7 +1265,7 @@ func (agt *agent) cleanUpService(orgPath string, orgID pgtype.UUID, serviceID pg
 		}
 
 		// Not sure we should do this, this will only cleanup things that broke during stop, maybe it is better to leave it so it can be inspected:
-		//stdout, stderr, err = utils.RunCommand("systemctl", "reset-failed", systemdBaseName)
+		//stdout, stderr, err = agentutils.RunCommand("systemctl", "reset-failed", systemdBaseName)
 		//if err != nil {
 		//	agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Str("pattern", systemdBaseName).Msg("systemctl reset-failed failed")
 		//	return err
@@ -1370,7 +1370,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 
 		if modified {
 			agt.logger.Info().Msg("calling networkctl reload")
-			stdout, stderr, err := utils.RunCommand("networkctl", "reload")
+			stdout, stderr, err := agentutils.RunCommand("networkctl", "reload")
 			if err != nil {
 				agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("networkctl reload failed")
 				return
@@ -1795,7 +1795,7 @@ func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls 
 
 func (agt *agent) systemctlShow(pattern string) (map[string]string, error) {
 	unitSettings := map[string]string{}
-	stdout, stderr, err := utils.RunCommand("systemctl", "show", pattern)
+	stdout, stderr, err := agentutils.RunCommand("systemctl", "show", pattern)
 	if err != nil {
 		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl show failed")
 		return nil, err
@@ -1820,7 +1820,7 @@ func (agt *agent) systemctlShow(pattern string) (map[string]string, error) {
 
 func (agt *agent) systemctlDaemonReload() error {
 	agt.logger.Info().Msg("calling systemctl daemon-reload")
-	stdout, stderr, err := utils.RunCommand("systemctl", "daemon-reload")
+	stdout, stderr, err := agentutils.RunCommand("systemctl", "daemon-reload")
 	if err != nil {
 		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl daamon-reload failed")
 		return err
@@ -1846,7 +1846,7 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 
 	if unitFileState == "disabled" {
 		agt.logger.Info().Str("service_name", name).Msg("enabling systemd service")
-		stdout, stderr, err := utils.RunCommand("systemctl", "enable", name)
+		stdout, stderr, err := agentutils.RunCommand("systemctl", "enable", name)
 		if err != nil {
 			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl enable failed")
 			return false, err
@@ -1875,7 +1875,7 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 
 		if activeState != "active" || subState != "running" {
 			agt.logger.Info().Str("service_name", name).Msg("starting systemd service")
-			stdout, stderr, err := utils.RunCommand("systemctl", "start", name)
+			stdout, stderr, err := agentutils.RunCommand("systemctl", "start", name)
 			if err != nil {
 				agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("systemctl start failed")
 				return false, err

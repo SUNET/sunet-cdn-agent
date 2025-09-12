@@ -1,6 +1,6 @@
 module github.com/SUNET/sunet-cdn-agent
 
-go 1.25.0
+go 1.25.1
 
 require (
 	github.com/SUNET/sunet-cdn-manager v0.0.0-20250501154804-6861d7052b11

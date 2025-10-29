@@ -65,6 +65,11 @@ type l4lbNodeSettings struct {
 	NetNSConfDir string `mapstructure:"netns_conf_dir" validate:"required"`
 }
 
+type modifiedService struct {
+	haproxy bool
+	varnish bool
+}
+
 // JSON format from "vcl.list -j" described here: https://varnish-cache.org/docs/trunk/reference/varnish-cli.html#json
 //
 // [ 2, ["vcl.list", "-j"], 1742022002.443,
@@ -810,7 +815,7 @@ func (agt *agent) reloadHAProxy(containerName string) error {
 	return nil
 }
 
-func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}, modifiedCerts map[string]map[string]struct{}) {
+func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[string]struct{}, modifiedCerts map[string]map[string]struct{}, modifiedActiveConfigs map[string]map[string]modifiedService) {
 	// Find out if there are containers running that need to be told that
 	// the active link points to a new version
 	// Expected output is something like this:
@@ -830,6 +835,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 
 	containerActiveChanged := map[string]struct{}{}
 	containerCertChanged := map[string]struct{}{}
+	containerActiveConfigChanged := map[string]struct{}{}
 	for containerNameScanner.Scan() {
 		containerName := containerNameScanner.Text()
 		if !strings.HasPrefix(containerName, containerPrefix) {
@@ -859,6 +865,20 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 				}
 			}
 		}
+
+		// Record containers for services who have had the active
+		// config updated
+		if _, ok := modifiedActiveConfigs[orgID]; ok {
+			if ms, ok := modifiedActiveConfigs[orgID][serviceID]; ok {
+				if ms.haproxy && strings.Contains(containerName, "-haproxy-") {
+					agt.logger.Info().Str("container_name", containerName).Msg("active haproxy config changed, needs to reload")
+					containerActiveConfigChanged[containerName] = struct{}{}
+				} else if ms.varnish && strings.Contains(containerName, "-varnish-") {
+					agt.logger.Info().Str("container_name", containerName).Msg("active varnish config changed, needs to reload")
+					containerActiveConfigChanged[containerName] = struct{}{}
+				}
+			}
+		}
 	}
 	if err := containerNameScanner.Err(); err != nil {
 		agt.logger.Err(err).Msg("reading docker ps output failed")
@@ -866,7 +886,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	}
 
 	// Since haproxy is reloaded the same way no matter if it is due to
-	// cert change or config symlink change just merge the two lists
+	// cert change or config (symlink) change just merge the lists
 	// together here so we only reload haproxy at most once.
 	mergedContainers := map[string]struct{}{}
 
@@ -875,6 +895,10 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	}
 
 	for containerName := range containerCertChanged {
+		mergedContainers[containerName] = struct{}{}
+	}
+
+	for containerName := range containerActiveConfigChanged {
 		mergedContainers[containerName] = struct{}{}
 	}
 
@@ -1387,10 +1411,15 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	// reload their config.
 	modifiedActiveLinks := map[string]map[string]struct{}{}
 
-	// This map is a orgIDs -> serviceIDs where the active version changed
+	// This map is a orgIDs -> serviceIDs where the TLS certs have changed
 	// It is used to know what containers need to be notified that they should
 	// reload their config.
 	modifiedCerts := map[string]map[string]struct{}{}
+
+	// This map is a orgIDs -> serviceIDs where the config pointed to by an
+	// active symlink have changed. It is used to know what containers need
+	// to be notified that they should reload their config.
+	modifiedActiveConfigs := map[string]map[string]modifiedService{}
 
 	// Expected directory structure:
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/sunet-cdn.vcl
@@ -1605,7 +1634,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 				}
 
 				haProxyConfFile := filepath.Join(haproxyPath, "haproxy.cfg")
-				_, err = agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), 0o600, version.HAProxyConfig)
+				haProxyConfChanged, err := agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), 0o600, version.HAProxyConfig)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build HAProxy conf file")
 					return
@@ -1619,7 +1648,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 				}
 
 				varnishVCLFile := filepath.Join(varnishPath, vclFilename)
-				_, err = agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
+				varnishVCLChanged, err := agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")
 					return
@@ -1640,6 +1669,27 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 							}
 						} else {
 							modifiedActiveLinks[org.ID.String()][service.ID.String()] = struct{}{}
+						}
+					}
+
+					// If the active configuration has
+					// changed we need to reload configs
+					// even if the active symlink has not
+					// been changed. This can happen if we
+					// modify any of the config templates.
+					if haProxyConfChanged || varnishVCLChanged {
+						if _, ok := modifiedActiveConfigs[org.ID.String()]; !ok {
+							modifiedActiveConfigs[org.ID.String()] = map[string]modifiedService{
+								service.ID.String(): {
+									haproxy: haProxyConfChanged,
+									varnish: varnishVCLChanged,
+								},
+							}
+						} else {
+							modifiedActiveConfigs[org.ID.String()][service.ID.String()] = modifiedService{
+								haproxy: haProxyConfChanged,
+								varnish: varnishVCLChanged,
+							}
 						}
 					}
 
@@ -1728,7 +1778,7 @@ func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
 	// container (and there is a larger chance of a race condition if
 	// trying to update the config of a container that is still not fully
 	// started).
-	agt.reloadContainerConfigs(modifiedActiveLinks, modifiedCerts)
+	agt.reloadContainerConfigs(modifiedActiveLinks, modifiedCerts, modifiedActiveConfigs)
 
 	if len(modifiedSystemdServices) > 0 {
 		err = agt.systemctlDaemonReload()

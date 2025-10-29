@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -46,9 +47,10 @@ type config struct {
 }
 
 type managerSettings struct {
-	URL      string `validate:"required"`
-	Username string `validate:"required"`
-	Password string `validate:"required"`
+	URL              string `validate:"required"`
+	DisableTLSVerify bool   `mapstructure:"disable_tls_verify" validate:"required"`
+	Username         string `validate:"required"`
+	Password         string `validate:"required"`
 }
 
 type confWriterSettings struct {
@@ -1924,6 +1926,17 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 
 	c := &http.Client{
 		Timeout: 15 * time.Second,
+	}
+
+	if conf.Manager.DisableTLSVerify {
+		logger.Info().Msg("disabling TLS verification for manager connection")
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // #nosec G402 -- needs explicit configuration
+			},
+		}
+
+		c.Transport = tr
 	}
 
 	tmpls := templates{}

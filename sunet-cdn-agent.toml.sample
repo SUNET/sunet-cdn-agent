@@ -1,7 +1,8 @@
 [manager]
 username = "username"
 password = "password"
-url = "http://localhost:8081"
+url = "https://localhost:8444"
+disable_tls_verify = false
 
 [confwriter]
 root_dir = "/tmp/sunet-cdn-agent"

@@ -48,7 +48,7 @@ type config struct {
 
 type managerSettings struct {
 	URL              string `validate:"required"`
-	DisableTLSVerify bool   `mapstructure:"disable_tls_verify" validate:"required"`
+	DisableTLSVerify bool   `mapstructure:"disable_tls_verify"`
 	Username         string `validate:"required"`
 	Password         string `validate:"required"`
 }

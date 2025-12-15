@@ -28,7 +28,7 @@ import (
 
 	"github.com/SUNET/sunet-cdn-agent/pkg/agentutils"
 	"github.com/SUNET/sunet-cdn-agent/pkg/ipvsadm"
-	"github.com/SUNET/sunet-cdn-manager/pkg/types"
+	"github.com/SUNET/sunet-cdn-manager/pkg/cdntypes"
 	"github.com/go-playground/validator/v10"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/rs/zerolog"
@@ -279,87 +279,87 @@ func (agt *agent) createOrUpdateFile(filename string, uid int, gid int, perm os.
 	return modified, nil
 }
 
-func (agt *agent) getL4LBNodeConfig() (types.L4LBNodeConfig, error) {
+func (agt *agent) getL4LBNodeConfig() (cdntypes.L4LBNodeConfig, error) {
 	u, err := url.Parse(agt.conf.Manager.URL)
 	if err != nil {
-		return types.L4LBNodeConfig{}, err
+		return cdntypes.L4LBNodeConfig{}, err
 	}
 
 	configURL, err := url.JoinPath(u.String(), "api/v1/l4lb-node-configs")
 	if err != nil {
-		return types.L4LBNodeConfig{}, err
+		return cdntypes.L4LBNodeConfig{}, err
 	}
 
 	req, err := http.NewRequest("GET", configURL, nil)
 	if err != nil {
-		return types.L4LBNodeConfig{}, err
+		return cdntypes.L4LBNodeConfig{}, err
 	}
 
 	req.SetBasicAuth(agt.conf.Manager.Username, agt.conf.Manager.Password)
 
 	resp, err := agt.httpClient.Do(req)
 	if err != nil {
-		return types.L4LBNodeConfig{}, err
+		return cdntypes.L4LBNodeConfig{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return types.L4LBNodeConfig{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return cdntypes.L4LBNodeConfig{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	lnc := types.L4LBNodeConfig{}
+	lnc := cdntypes.L4LBNodeConfig{}
 
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return types.L4LBNodeConfig{}, err
+		return cdntypes.L4LBNodeConfig{}, err
 	}
 
 	err = json.Unmarshal(b, &lnc)
 	if err != nil {
-		return types.L4LBNodeConfig{}, err
+		return cdntypes.L4LBNodeConfig{}, err
 	}
 
 	return lnc, nil
 }
 
-func (agt *agent) getCacheNodeConfig() (types.CacheNodeConfig, error) {
+func (agt *agent) getCacheNodeConfig() (cdntypes.CacheNodeConfig, error) {
 	u, err := url.Parse(agt.conf.Manager.URL)
 	if err != nil {
-		return types.CacheNodeConfig{}, err
+		return cdntypes.CacheNodeConfig{}, err
 	}
 
 	configURL, err := url.JoinPath(u.String(), "api/v1/cache-node-configs")
 	if err != nil {
-		return types.CacheNodeConfig{}, err
+		return cdntypes.CacheNodeConfig{}, err
 	}
 
 	req, err := http.NewRequest("GET", configURL, nil)
 	if err != nil {
-		return types.CacheNodeConfig{}, err
+		return cdntypes.CacheNodeConfig{}, err
 	}
 
 	req.SetBasicAuth(agt.conf.Manager.Username, agt.conf.Manager.Password)
 
 	resp, err := agt.httpClient.Do(req)
 	if err != nil {
-		return types.CacheNodeConfig{}, err
+		return cdntypes.CacheNodeConfig{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return types.CacheNodeConfig{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return cdntypes.CacheNodeConfig{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	cnc := types.CacheNodeConfig{}
+	cnc := cdntypes.CacheNodeConfig{}
 
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return types.CacheNodeConfig{}, err
+		return cdntypes.CacheNodeConfig{}, err
 	}
 
 	err = json.Unmarshal(b, &cnc)
 	if err != nil {
-		return types.CacheNodeConfig{}, err
+		return cdntypes.CacheNodeConfig{}, err
 	}
 
 	return cnc, nil
@@ -637,7 +637,7 @@ func (agt *agent) createDirPathIfNeeded(path string, uid int, gid int, perm os.F
 	return nil
 }
 
-func (agt *agent) collectIPAddresses(orgs map[string]types.OrgWithServices, orderedOrgs []string) []orgIPContainer {
+func (agt *agent) collectIPAddresses(orgs map[string]cdntypes.OrgWithServices, orderedOrgs []string) []orgIPContainer {
 	allIPAddrs := []orgIPContainer{}
 	for _, orgUUID := range orderedOrgs {
 		org := orgs[orgUUID]
@@ -668,7 +668,7 @@ func (agt *agent) collectIPAddresses(orgs map[string]types.OrgWithServices, orde
 	return allIPAddrs
 }
 
-func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}, org types.OrgWithServices, service types.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
+func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}, org cdntypes.OrgWithServices, service cdntypes.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
 	for _, versionNumber := range orderedVersions {
 		version := service.ServiceVersions[versionNumber]
 
@@ -972,7 +972,7 @@ type interfaceConfig map[string]addressConfig
 
 type addressConfig map[string][]string
 
-func (agt *agent) setupNetNS(lnc types.L4LBNodeConfig) error {
+func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 	namespaceName := "l4lb"
 	interfaceName := "dummy0"
 	ipv4Key := "ipv4"
@@ -1020,7 +1020,7 @@ func (agt *agent) setupNetNS(lnc types.L4LBNodeConfig) error {
 	return nil
 }
 
-func (agt *agent) setupIpvsadm(lnc types.L4LBNodeConfig, l4lbConfPath string) error {
+func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string) error {
 	ipvsadmConfPath := filepath.Join(l4lbConfPath, "ipvsadm")
 	err := agt.createDirPathIfNeeded(ipvsadmConfPath, 0, 0, 0o700)
 	if err != nil {
@@ -1179,7 +1179,7 @@ func (agt *agent) setupIpvsadm(lnc types.L4LBNodeConfig, l4lbConfPath string) er
 	return nil
 }
 
-func (agt *agent) generateL4LBFiles(lnc types.L4LBNodeConfig) {
+func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig) {
 	l4lbConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "l4lb-conf")
 	err := agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o700)
 	if err != nil {
@@ -1341,7 +1341,7 @@ func getServiceIDPath(servicePath string, serviceID pgtype.UUID) string {
 	return filepath.Join(servicePath, serviceID.String())
 }
 
-func (agt *agent) generateCacheFiles(cnc types.CacheNodeConfig) {
+func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 	cacheConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "cache-conf")
 	err := agt.createDirPathIfNeeded(cacheConfPath, 0, 0, 0o700)
 	if err != nil {

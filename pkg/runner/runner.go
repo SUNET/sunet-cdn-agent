@@ -51,7 +51,7 @@ type managerSettings struct {
 	DisableTLSVerify bool   `mapstructure:"disable_tls_verify"`
 	Username         string `validate:"required"`
 	Password         string `validate:"required"`
-	NodeID           string `validate:"required"`
+	NodeID           string `mapstructure:"node_id" validate:"required"`
 }
 
 type confWriterSettings struct {

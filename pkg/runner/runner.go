@@ -51,6 +51,7 @@ type managerSettings struct {
 	DisableTLSVerify bool   `mapstructure:"disable_tls_verify"`
 	Username         string `validate:"required"`
 	Password         string `validate:"required"`
+	NodeID           string `validate:"required"`
 }
 
 type confWriterSettings struct {
@@ -285,7 +286,7 @@ func (agt *agent) getL4LBNodeConfig() (cdntypes.L4LBNodeConfig, error) {
 		return cdntypes.L4LBNodeConfig{}, err
 	}
 
-	configURL, err := url.JoinPath(u.String(), "api/v1/l4lb-node-configs")
+	configURL, err := url.JoinPath(u.String(), "api/v1/l4lb-node-configs", agt.conf.Manager.NodeID)
 	if err != nil {
 		return cdntypes.L4LBNodeConfig{}, err
 	}
@@ -328,7 +329,7 @@ func (agt *agent) getCacheNodeConfig() (cdntypes.CacheNodeConfig, error) {
 		return cdntypes.CacheNodeConfig{}, err
 	}
 
-	configURL, err := url.JoinPath(u.String(), "api/v1/cache-node-configs")
+	configURL, err := url.JoinPath(u.String(), "api/v1/cache-node-configs", agt.conf.Manager.NodeID)
 	if err != nil {
 		return cdntypes.CacheNodeConfig{}, err
 	}

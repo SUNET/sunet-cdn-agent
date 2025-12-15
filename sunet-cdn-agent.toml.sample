@@ -3,6 +3,7 @@ username = "username"
 password = "password"
 url = "https://localhost:8444"
 disable_tls_verify = false
+node_id = "local-node-id-or-name"
 
 [confwriter]
 root_dir = "/tmp/sunet-cdn-agent"

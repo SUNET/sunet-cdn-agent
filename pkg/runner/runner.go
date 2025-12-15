@@ -1021,6 +1021,124 @@ func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 	return nil
 }
 
+func nftablesSetString(addresses []netip.Addr) string {
+	var b strings.Builder
+
+	b.WriteString("{ ")
+
+	for i, addr := range addresses {
+		if i == 0 {
+			b.WriteString(addr.String())
+		} else {
+			b.WriteString(", " + addr.String())
+		}
+	}
+
+	b.WriteString(" }")
+
+	return b.String()
+}
+
+func prefixNftablesSetString(prefixes []netip.Prefix) string {
+	var b strings.Builder
+
+	b.WriteString("{ ")
+
+	for i, prefix := range prefixes {
+		if i == 0 {
+			b.WriteString(prefix.String())
+		} else {
+			b.WriteString(", " + prefix.String())
+		}
+	}
+
+	b.WriteString(" }")
+
+	return b.String()
+}
+
+func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir string) error {
+	// Manage rules for receiving tunnel traffic from l4lb nodes:
+	// ip saddr { 10.0.0.10, 10.0.0.11 } ip protocol ipencap counter packets 0 bytes 0 accept comment "sunet-cdn-agent-tunnel4"
+	// ip6 saddr { 2001:db8::1, 2001:db8::2 } ip6 nexthdr ipv6 counter packets 0 bytes 0 accept comment "sunet-cdn-agent-tunnel6"
+	//
+	// ... as well as what traffic is allowed to be sent via tunneled traffic:
+	// iifname "tunl0" ip daddr { 192.168.1.0/24, 192.168.2.0/24 } tcp dport { 80, 443 } counter packets 0 bytes 0 accept comment "sunet-cdn-agent-agent-service4"
+	// iifname "ip6tnl0" ip6 daddr { 2001:db8:0001::/48 , 2001:0db8:0002::/48 } tcp dport { 80, 443 } counter packets 0 bytes 0 accept comment "sunet-cdn-agent-service6"
+
+	nftablesRules := []string{}
+
+	tunnelSources4 := []netip.Addr{}
+	tunnelSources6 := []netip.Addr{}
+
+	for _, l4lbNode := range cnc.L4LBNodes {
+		if l4lbNode.IPv4Address != nil {
+			tunnelSources4 = append(tunnelSources4, *l4lbNode.IPv4Address)
+		}
+
+		if l4lbNode.IPv6Address != nil {
+			tunnelSources6 = append(tunnelSources6, *l4lbNode.IPv6Address)
+		}
+	}
+
+	if len(tunnelSources4) > 0 {
+		v4TunnelSourceSet := nftablesSetString(tunnelSources4)
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip saddr %s ip protocol ipencap counter accept comment \"sunet-cdn-agent-tunnel4\"", v4TunnelSourceSet))
+	}
+
+	if len(tunnelSources6) > 0 {
+		v6TunnelSourceSet := nftablesSetString(tunnelSources6)
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip6 saddr %s ip6 nexthdr ipv6 counter accept comment \"sunet-cdn-agent-tunnel6\"", v6TunnelSourceSet))
+
+	}
+
+	serviceNetworks4 := []netip.Prefix{}
+	serviceNetworks6 := []netip.Prefix{}
+
+	for _, network := range cnc.IPNetworks {
+		if network.Addr().Unmap().Is4() {
+			serviceNetworks4 = append(serviceNetworks4, network)
+		} else if network.Addr().Unmap().Is6() {
+			serviceNetworks6 = append(serviceNetworks6, network)
+		} else {
+			return fmt.Errorf("setupNftables: unknown address type for prefix: %s", network)
+		}
+	}
+
+	if len(serviceNetworks4) > 0 {
+		serviceNetworkSet4 := prefixNftablesSetString(serviceNetworks4)
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname tunl0 ip daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-agent-service4\"", serviceNetworkSet4))
+	}
+
+	if len(serviceNetworks6) > 0 {
+		serviceNetworkSet6 := prefixNftablesSetString(serviceNetworks6)
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-agent-service6\"", serviceNetworkSet6))
+	}
+
+	if len(nftablesRules) > 0 {
+		nftablesRulesFile := filepath.Join(nftablesConfDir, "900-sunet-cdn-agent-cache-rules.conf")
+
+		newNftablesRulesString := strings.Join(nftablesRules, "\n")
+		modified, err := agt.createOrUpdateFile(nftablesRulesFile, 0, 0, 0o600, newNftablesRulesString)
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to write out nftables rules")
+			return err
+		}
+
+		if modified {
+			commandName := "systemctl"
+			args := strings.Fields("restart nftables.service")
+			agt.logger.Info().Str("command", commandName).Strs("args", args).Msg("restarting nftables.service")
+			stdout, stderr, err := agentutils.RunCommand(commandName, args...)
+			if err != nil {
+				return fmt.Errorf("setupNftables: unable to restart nftables.service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string) error {
 	ipvsadmConfPath := filepath.Join(l4lbConfPath, "ipvsadm")
 	err := agt.createDirPathIfNeeded(ipvsadmConfPath, 0, 0, 0o700)
@@ -1343,8 +1461,14 @@ func getServiceIDPath(servicePath string, serviceID pgtype.UUID) string {
 }
 
 func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
+	err := agt.setupNftables(cnc, "/etc/nftables/conf.d")
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to setup nftables rules")
+		return
+	}
+
 	cacheConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "cache-conf")
-	err := agt.createDirPathIfNeeded(cacheConfPath, 0, 0, 0o700)
+	err = agt.createDirPathIfNeeded(cacheConfPath, 0, 0, 0o700)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create cache-conf dir")
 		return

@@ -1114,7 +1114,7 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 
 	if len(serviceNetworks6) > 0 {
 		serviceNetworkSet6 := prefixNftablesSetString(serviceNetworks6)
-		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-agent-service6\"", serviceNetworkSet6))
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip6 daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-agent-service6\"", serviceNetworkSet6))
 	}
 
 	if len(nftablesRules) > 0 {

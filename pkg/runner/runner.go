@@ -1120,7 +1120,7 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 	if len(nftablesRules) > 0 {
 		nftablesRulesFile := filepath.Join(nftablesConfDir, "900-sunet-cdn-agent-cache-rules.nft")
 
-		newNftablesRulesString := strings.Join(nftablesRules, "\n")
+		newNftablesRulesString := strings.Join(nftablesRules, "\n") + "\n"
 		modified, err := agt.createOrUpdateFile(nftablesRulesFile, 0, 0, 0o600, newNftablesRulesString)
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to write out nftables rules")

@@ -1063,7 +1063,7 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 	// ip6 saddr { 2001:db8::1, 2001:db8::2 } ip6 nexthdr ipv6 counter packets 0 bytes 0 accept comment "sunet-cdn-agent-tunnel6"
 	//
 	// ... as well as what traffic is allowed to be sent via tunneled traffic:
-	// iifname "tunl0" ip daddr { 192.168.1.0/24, 192.168.2.0/24 } tcp dport { 80, 443 } counter packets 0 bytes 0 accept comment "sunet-cdn-agent-agent-service4"
+	// iifname "tunl0" ip daddr { 192.168.1.0/24, 192.168.2.0/24 } tcp dport { 80, 443 } counter packets 0 bytes 0 accept comment "sunet-cdn-agent-service4"
 	// iifname "ip6tnl0" ip6 daddr { 2001:db8:0001::/48 , 2001:0db8:0002::/48 } tcp dport { 80, 443 } counter packets 0 bytes 0 accept comment "sunet-cdn-agent-service6"
 
 	nftablesRules := []string{}
@@ -1109,12 +1109,12 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 
 	if len(serviceNetworks4) > 0 {
 		serviceNetworkSet4 := prefixNftablesSetString(serviceNetworks4)
-		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname tunl0 ip daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-agent-service4\"", serviceNetworkSet4))
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname tunl0 ip daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-service4\"", serviceNetworkSet4))
 	}
 
 	if len(serviceNetworks6) > 0 {
 		serviceNetworkSet6 := prefixNftablesSetString(serviceNetworks6)
-		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip6 daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-agent-service6\"", serviceNetworkSet6))
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip6 daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-service6\"", serviceNetworkSet6))
 	}
 
 	if len(nftablesRules) > 0 {

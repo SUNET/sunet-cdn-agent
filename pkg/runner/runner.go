@@ -1072,12 +1072,14 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 	tunnelSources6 := []netip.Addr{}
 
 	for _, l4lbNode := range cnc.L4LBNodes {
-		if l4lbNode.IPv4Address != nil {
-			tunnelSources4 = append(tunnelSources4, *l4lbNode.IPv4Address)
-		}
-
-		if l4lbNode.IPv6Address != nil {
-			tunnelSources6 = append(tunnelSources6, *l4lbNode.IPv6Address)
+		for _, l4lbAddress := range l4lbNode.Addresses {
+			if l4lbAddress.Unmap().Is4() {
+				tunnelSources4 = append(tunnelSources4, l4lbAddress)
+			} else if l4lbAddress.Unmap().Is6() {
+				tunnelSources6 = append(tunnelSources6, l4lbAddress)
+			} else {
+				return fmt.Errorf("setupNftables: unknown address type for l4lb address: %s", l4lbAddress)
+			}
 		}
 	}
 
@@ -1184,28 +1186,32 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 					}
 
 					if unmapServiceAddr.Is4() {
-						if cacheNode.IPv4Address != nil {
-							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv4Address.Unmap(), port, weight, "ipip")
-							if err != nil {
-								return fmt.Errorf("unable to init HTTP IPv4 cachenode real-server: %w", err)
-							}
+						for _, cacheNodeAddress := range cacheNode.Addresses {
+							if cacheNodeAddress.Unmap().Is4() {
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								if err != nil {
+									return fmt.Errorf("unable to init HTTP IPv4 cachenode real-server: %w", err)
+								}
 
-							err = newIPVSRules.AddRS(rs)
-							if err != nil {
-								return fmt.Errorf("unable to add HTTP IPv4 cachenode real-server to ruleset: %w", err)
+								err = newIPVSRules.AddRS(rs)
+								if err != nil {
+									return fmt.Errorf("unable to add HTTP IPv4 cachenode real-server to ruleset: %w", err)
+								}
 							}
 						}
 					}
 					if serviceAddr.Unmap().Is6() {
-						if cacheNode.IPv6Address != nil {
-							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv6Address.Unmap(), port, weight, "ipip")
-							if err != nil {
-								return fmt.Errorf("unable to init HTTP IPv6 cachenode real-server: %w", err)
-							}
+						for _, cacheNodeAddress := range cacheNode.Addresses {
+							if cacheNodeAddress.Unmap().Is6() {
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								if err != nil {
+									return fmt.Errorf("unable to init HTTP IPv6 cachenode real-server: %w", err)
+								}
 
-							err = newIPVSRules.AddRS(rs)
-							if err != nil {
-								return fmt.Errorf("unable to add HTTP IPv6 cachenode real-server to ruleset: %w", err)
+								err = newIPVSRules.AddRS(rs)
+								if err != nil {
+									return fmt.Errorf("unable to add HTTP IPv6 cachenode real-server to ruleset: %w", err)
+								}
 							}
 						}
 					}
@@ -1230,28 +1236,32 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 						weight = 0
 					}
 					if unmapServiceAddr.Is4() {
-						if cacheNode.IPv4Address != nil {
-							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv4Address.Unmap(), port, weight, "ipip")
-							if err != nil {
-								return fmt.Errorf("unable to init HTTPS IPv4 cachenode real-server: %w", err)
-							}
+						for _, cacheNodeAddress := range cacheNode.Addresses {
+							if cacheNodeAddress.Unmap().Is4() {
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								if err != nil {
+									return fmt.Errorf("unable to init HTTPS IPv4 cachenode real-server: %w", err)
+								}
 
-							err = newIPVSRules.AddRS(rs)
-							if err != nil {
-								return fmt.Errorf("unable to add HTTPS IPv4 cachenode real-server to ruleset: %w", err)
+								err = newIPVSRules.AddRS(rs)
+								if err != nil {
+									return fmt.Errorf("unable to add HTTPS IPv4 cachenode real-server to ruleset: %w", err)
+								}
 							}
 						}
 					}
 					if unmapServiceAddr.Is6() {
-						if cacheNode.IPv6Address != nil {
-							rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNode.IPv6Address.Unmap(), port, weight, "ipip")
-							if err != nil {
-								return fmt.Errorf("unable to init HTTPS IPv6 cachenode real-server: %w", err)
-							}
+						for _, cacheNodeAddress := range cacheNode.Addresses {
+							if cacheNodeAddress.Unmap().Is6() {
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								if err != nil {
+									return fmt.Errorf("unable to init HTTPS IPv6 cachenode real-server: %w", err)
+								}
 
-							err = newIPVSRules.AddRS(rs)
-							if err != nil {
-								return fmt.Errorf("unable to add HTTPS IPv6S cachenode real-server to ruleset: %w", err)
+								err = newIPVSRules.AddRS(rs)
+								if err != nil {
+									return fmt.Errorf("unable to add HTTPS IPv6S cachenode real-server to ruleset: %w", err)
+								}
 							}
 						}
 					}

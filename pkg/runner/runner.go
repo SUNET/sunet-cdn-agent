@@ -157,7 +157,7 @@ var validate = validator.New(validator.WithRequiredStructEnabled())
 
 func (agt *agent) replaceFile(filename string, uid int, gid int, perm os.FileMode, content string) error {
 	tmpFilename := filename + ".tmp"
-	tmpFilenameFh, err := os.OpenFile(filepath.Clean(tmpFilename), os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- gosec gets upset because perm is passed in as a variable which seems strange, see https://github.com/securego/gosec/issues/1318
+	tmpFilenameFh, err := os.OpenFile(filepath.Clean(tmpFilename), os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		agt.logger.Err(err).Str("path", tmpFilename).Msg("unable to create file")
 		return err

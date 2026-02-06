@@ -540,7 +540,6 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) (bool, e
 
 		// If the link already exists, make sure it is pointing to the correct version, otherwise update it
 	}
-	fmt.Println(lnPath, "->", activeVersion)
 	return modified, nil
 }
 
@@ -1642,7 +1641,6 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 			agt.logger.Err(err).Msg("unable to create orgs ID dir")
 			return
 		}
-		fmt.Println(orgPath)
 
 		orderedServices := []string{}
 		for serviceUUID := range org.Services {
@@ -1671,7 +1669,6 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 				agt.logger.Err(err).Msg("unable to create service ID dir")
 				return
 			}
-			fmt.Println(servicePath)
 
 			orderedVersions := []int64{}
 			for versionNumber := range service.ServiceVersions {
@@ -1759,7 +1756,6 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					agt.logger.Err(err).Msg("unable to create version path")
 					return
 				}
-				fmt.Println(versionPath)
 
 				haproxyPath := filepath.Join(versionPath, "haproxy")
 				err = agt.createDirPathIfNeeded(haproxyPath, int(haProxyUID), 0, 0o700)

@@ -6,7 +6,7 @@ import (
 )
 
 func RunCommand(name string, arg ...string) (string, string, error) {
-	cmd := exec.Command(name, arg...)
+	cmd := exec.Command(name, arg...) // #nosec G204 - This function is expected to run any supplied command
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout

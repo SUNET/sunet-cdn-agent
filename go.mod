@@ -3,9 +3,9 @@ module github.com/SUNET/sunet-cdn-agent
 go 1.26.1
 
 require (
-	github.com/SUNET/sunet-cdn-manager v0.0.30
+	github.com/SUNET/sunet-cdn-manager v0.0.31
 	github.com/go-playground/validator/v10 v10.30.1
-	github.com/jackc/pgx/v5 v5.9.0
+	github.com/jackc/pgx/v5 v5.9.1
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0

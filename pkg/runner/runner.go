@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -38,6 +39,7 @@ import (
 const (
 	nodeTypeCache = "cache"
 	vclFilename   = "sunet-cdn.vcl"
+	birdUsername  = "bird"
 )
 
 type config struct {
@@ -430,11 +432,35 @@ func generateCacheSystemdService(tmpl *template.Template, cssc cacheSystemdServi
 	return b.String(), nil
 }
 
+func generateBirdActive(tmpl *template.Template, pfl prefixFilterLists) (string, error) {
+	var b strings.Builder
+
+	err := tmpl.Execute(&b, pfl)
+	if err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
+}
+
+func generateBirdMaintenance(tmpl *template.Template) (string, error) {
+	var b strings.Builder
+
+	err := tmpl.Execute(&b, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
+}
+
 type templates struct {
 	cacheCompose        *template.Template
 	cacheService        *template.Template
 	slashSeccompFile    *template.Template
 	systemdDummyNetwork *template.Template
+	birdActive          *template.Template
+	birdMaintenance     *template.Template
 }
 
 type agent struct {
@@ -485,7 +511,7 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) (bool, e
 		// Error out if "active" is not actually a symlink
 		if lnInfo.Mode()&os.ModeSymlink != os.ModeSymlink {
 			agt.logger.Error().Str("mode", lnInfo.Mode().String()).Msg("the 'active' file is not a symlink, this is unexpected")
-			return false, err
+			return false, fmt.Errorf("active version file %q at path %q is not a symlink (mode: %s)", filepath.Base(lnPath), lnPath, lnInfo.Mode().String())
 		}
 
 		lnDest, err := os.Readlink(lnPath)
@@ -502,45 +528,49 @@ func (agt *agent) setActiveLink(baseDir string, activeVersionInt int64) (bool, e
 		}
 
 		if lnDest != activeVersion {
-			// We need to replace the symlink, do it atomically by
-			// creating a new temporary symlink pointing to the
-			// active dir and then rename it to the real "active"
-			// link.
-			agt.logger.Info().Str("old", lnDest).Str("new", activeVersion).Msg("updating active link")
-			lnTmpPath := lnPath + ".tmp"
-
-			// Make sure there is no leftover .tmp file from a
-			// crash that will make the symlink creation fail
-			err := os.Remove(lnTmpPath)
+			agt.logger.Info().Str("old_ln_target", lnDest).Str("new_ln_target", activeVersion).Msg("updating active link")
+			modified, err = agt.atomicReplaceSymlink(activeVersion, lnPath)
 			if err != nil {
-				// The file not existing is the expected result
-				if !errors.Is(err, fs.ErrNotExist) {
-					agt.logger.Err(err).Str("path", lnPath).Msg("unable to cleanup previous temporary symlink")
-					return false, err
-				}
-			} else {
-				// Huh, turns out there was actually a leftover file to remove
-				agt.logger.Info().Str("path", lnPath).Msg("cleaned up old temporary symlink")
-			}
-
-			agt.logger.Info().Str("dest", activeVersion).Str("path", lnTmpPath).Msg("creating replacement symlink")
-			err = os.Symlink(activeVersion, lnTmpPath)
-			if err != nil {
-				agt.logger.Err(err).Str("path", lnPath).Msg("unable to create temporary symlink")
 				return false, err
 			}
-			err = os.Rename(lnTmpPath, lnPath)
-			if err != nil {
-				agt.logger.Err(err).Msg("unable to update active symlink")
-				return false, err
-			}
-			agt.logger.Info().Str("src", lnTmpPath).Str("dest", lnPath).Msg("updated active symlink")
-			modified = true
 		}
-
-		// If the link already exists, make sure it is pointing to the correct version, otherwise update it
 	}
 	return modified, nil
+}
+
+// atomicReplaceSymlink() replaces a symlink by creating a new temporary
+// symlink and renaming it in place over the existing symlink.
+func (agt *agent) atomicReplaceSymlink(lnTarget string, lnName string) (bool, error) {
+	lnNameTmp := lnName + ".tmp"
+
+	// Make sure there is no leftover .tmp file from a
+	// crash that will make the symlink creation fail
+	err := os.Remove(lnNameTmp)
+	if err != nil {
+		// The file not existing is the expected result
+		if !errors.Is(err, fs.ErrNotExist) {
+			agt.logger.Err(err).Str("ln_tmp_name", lnNameTmp).Msg("unable to cleanup previous temporary symlink")
+			return false, err
+		}
+	} else {
+		// Huh, turns out there was actually a leftover file to remove
+		agt.logger.Info().Str("ln_tmp_name", lnNameTmp).Msg("cleaned up old temporary symlink")
+	}
+
+	agt.logger.Info().Str("ln_target", lnTarget).Str("ln_tmp_name", lnNameTmp).Msg("creating replacement symlink")
+	err = os.Symlink(lnTarget, lnNameTmp)
+	if err != nil {
+		agt.logger.Err(err).Str("ln_tmp_name", lnNameTmp).Msg("unable to create temporary symlink")
+		return false, err
+	}
+	err = os.Rename(lnNameTmp, lnName)
+	if err != nil {
+		agt.logger.Err(err).Str("ln_name", lnName).Msg("unable to update symlink")
+		return false, err
+	}
+	agt.logger.Info().Str("ln_target", lnTarget).Str("ln_name", lnName).Msg("replaced symlink")
+
+	return true, nil
 }
 
 func (agt *agent) chownIfNeeded(path string, fileInfo os.FileInfo, uid int, gid int) error {
@@ -938,6 +968,11 @@ type orgIPContainer struct {
 	ServiceIPContainers []serviceIPContainer
 }
 
+type prefixFilterLists struct {
+	IP4NetworkList string
+	IP6NetworkList string
+}
+
 type serviceIPContainer struct {
 	ID          pgtype.UUID
 	IPAddresses []netip.Addr
@@ -1014,6 +1049,7 @@ func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
 		if err != nil {
 			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
+			return fmt.Errorf("failed to run %q: %w", strings.Join(args, " "), err)
 		}
 	}
 
@@ -1307,9 +1343,180 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 	return nil
 }
 
-func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig) {
+// Make it easier to include a formatted list of addresses in the bird filter
+// file rather than doing the whitespace juggling inside the template.
+func formatFilterPrefixes(prefixes []netip.Prefix) string {
+	prefixStrings := []string{}
+
+	for _, prefix := range prefixes {
+		var prefixLow, prefixHigh int
+		if prefix.Addr().Is4() {
+			prefixLow = 32
+			prefixHigh = 32
+		} else {
+			prefixLow = 128
+			prefixHigh = 128
+		}
+		prefixStrings = append(prefixStrings, fmt.Sprintf("%s{%d,%d}", prefix.String(), prefixLow, prefixHigh))
+	}
+
+	return strings.Join(prefixStrings, ",\n\t\t")
+}
+
+func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, birdUID int, birdGID int) error {
+	l4lbBirdPath := filepath.Join(l4lbConfPath, "bird")
+	err := agt.createDirPathIfNeeded(l4lbBirdPath, birdUID, birdGID, 0o750)
+	if err != nil {
+		agt.logger.Err(err).Str("path", l4lbBirdPath).Msg("unable to create l4lb bird dir")
+		return err
+	}
+
+	birdConfPath := filepath.Join(l4lbBirdPath, "conf")
+	err = agt.createDirPathIfNeeded(birdConfPath, birdUID, birdGID, 0o750)
+	if err != nil {
+		agt.logger.Err(err).Str("path", birdConfPath).Msg("unable to create bird conf dir")
+		return err
+	}
+
+	birdConfSymlinkFile := filepath.Join(birdConfPath, "filter.conf")
+
+	ip4Networks := []netip.Prefix{}
+	ip6Networks := []netip.Prefix{}
+	for _, prefix := range lnc.IPNetworks {
+		if prefix.Addr().Is4() {
+			ip4Networks = append(ip4Networks, prefix)
+		} else if prefix.Addr().Is6() {
+			ip6Networks = append(ip6Networks, prefix)
+		} else {
+			errPrefix := fmt.Errorf("setupBird: prefix is neither v4 or v6: %s", prefix)
+			agt.logger.Err(errPrefix).Msg("iterating over lnc.IPNetworks failed")
+			return errPrefix
+		}
+	}
+
+	pfl := prefixFilterLists{
+		IP4NetworkList: formatFilterPrefixes(ip4Networks),
+		IP6NetworkList: formatFilterPrefixes(ip6Networks),
+	}
+
+	birdActive, err := generateBirdActive(agt.templates.birdActive, pfl)
+	if err != nil {
+		agt.logger.Err(err).Msg("generating l4lb bird active conf failed")
+		return err
+	}
+
+	activeFilename := "active.conf"
+	maintenanceFilename := "maintenance.conf"
+
+	birdConfActiveFile := filepath.Join(birdConfPath, activeFilename)
+	activeModified, err := agt.createOrUpdateFile(birdConfActiveFile, birdUID, birdGID, 0o640, birdActive)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to build bird active.conf file")
+		return err
+	}
+
+	birdMaintenance, err := generateBirdMaintenance(agt.templates.birdMaintenance)
+	if err != nil {
+		agt.logger.Err(err).Msg("generating l4lb bird maintenance conf failed")
+		return err
+	}
+
+	birdConfMaintenanceFile := filepath.Join(birdConfPath, maintenanceFilename)
+	maintenanceModified, err := agt.createOrUpdateFile(birdConfMaintenanceFile, birdUID, birdGID, 0o640, birdMaintenance)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to build bird maintenance.conf file")
+		return err
+	}
+
+	// Use the relative names for active.conf and maintenance.conf since they live in the same directory as the symlink
+	lnModified, err := agt.setBirdLink(birdConfSymlinkFile, activeFilename, maintenanceFilename, lnc.L4LBNode.Maintenance)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create bird link")
+		return err
+	}
+
+	// We need to reconfigure bird if either the current state we are in
+	// has had its related config file modified, or if the symlink has been
+	// updated at all.
+	if (maintenanceModified && lnc.L4LBNode.Maintenance) || (activeModified && !lnc.L4LBNode.Maintenance) || lnModified {
+		args := []string{"birdc", "configure"}
+		agt.logger.Info().Strs("cmd", args).Msg("running command")
+		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
+			return fmt.Errorf("failed to run %q: %w", strings.Join(args, " "), err)
+		}
+	}
+
+	return nil
+}
+
+func (agt *agent) setBirdLink(lnPath string, activeTargetFile string, maintenanceTargetFile string, maintenance bool) (bool, error) {
+	modified := false
+
+	var targetFile string
+	if maintenance {
+		targetFile = maintenanceTargetFile
+	} else {
+		targetFile = activeTargetFile
+	}
+
+	lnInfo, err := os.Lstat(lnPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			agt.logger.Info().Str("path", lnPath).Msg("creating bird symlink")
+			err := os.Symlink(targetFile, lnPath)
+			if err != nil {
+				agt.logger.Err(err).Str("path", lnPath).Str("link_target", targetFile).Msg("unable to create symlink")
+				return false, err
+			}
+			agt.logger.Info().Str("path", lnPath).Str("link_target", targetFile).Msg("created bird symlink")
+			modified = true
+		} else {
+			agt.logger.Err(err).Msg("stat of bird symlink failed")
+			return false, err
+		}
+	} else {
+		// Error out if the bird file is not actually a symlink
+		if lnInfo.Mode()&os.ModeSymlink != os.ModeSymlink {
+			agt.logger.Error().Str("mode", lnInfo.Mode().String()).Msg("the bird file is not a symlink, this is unexpected")
+			return false, fmt.Errorf("bird file %q at path %q is not a symlink (mode: %s)", filepath.Base(lnPath), lnPath, lnInfo.Mode().String())
+		}
+
+		lnDest, err := os.Readlink(lnPath)
+		if err != nil {
+			agt.logger.Err(err).Str("path", lnPath).Msg("unable to get destination of bird symlink")
+			return false, err
+		}
+
+		// Check if we are pointing to the expected target based on if we are in maintenance mode or not
+		lnNewTarget := ""
+		switch {
+		case maintenance && lnDest != maintenanceTargetFile:
+			lnNewTarget = maintenanceTargetFile
+		case !maintenance && lnDest != activeTargetFile:
+			lnNewTarget = activeTargetFile
+		}
+
+		if lnNewTarget != "" {
+			// We need to replace the symlink, do it atomically by
+			// creating a new temporary symlink pointing to the
+			// expected config and then rename it to the real bird
+			// config link.
+			agt.logger.Info().Str("old_ln_target", lnDest).Str("new_ln_target", lnNewTarget).Msg("updating bird link")
+
+			modified, err = agt.atomicReplaceSymlink(lnNewTarget, lnPath)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+	return modified, nil
+}
+
+func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig, birdUID int, birdGID int) {
 	l4lbConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "l4lb-conf")
-	err := agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o700)
+	err := agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o711)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create l4lb-conf dir")
 		return
@@ -1321,6 +1528,11 @@ func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig) {
 	}
 
 	err = agt.setupIpvsadm(lnc, l4lbConfPath)
+	if err != nil {
+		return
+	}
+
+	err = agt.setupBird(lnc, l4lbConfPath, birdUID, birdGID)
 	if err != nil {
 		return
 	}
@@ -1863,7 +2075,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 
 			cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, ccc)
 			if err != nil {
-				agt.logger.Fatal().Err(err).Msg("generating cache compose config failed")
+				agt.logger.Err(err).Msg("generating cache compose config failed")
 				return
 			}
 
@@ -1885,7 +2097,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 
 				cacheService, err := generateCacheSystemdService(agt.templates.cacheService, cssc)
 				if err != nil {
-					agt.logger.Fatal().Err(err).Msg("generating cache systemd service failed")
+					agt.logger.Err(err).Msg("generating cache systemd service failed")
 					return
 				}
 
@@ -1926,7 +2138,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 	}
 }
 
-func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup) {
+func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup, birdUID int, birdGID int) {
 	defer wg.Done()
 
 mainLoop:
@@ -1935,11 +2147,11 @@ mainLoop:
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to fetch l4lb node config")
 		} else {
-			agt.generateL4LBFiles(lnc)
+			agt.generateL4LBFiles(lnc, birdUID, birdGID)
 		}
-		// Wait for the next time to run the loop, or exit if we are sutting down
+		// Wait for the next time to run the loop, or exit if we are shutting down
 		select {
-		case <-time.Tick(time.Second * 10):
+		case <-time.After(time.Second * 10):
 		case <-agt.ctx.Done():
 			break mainLoop
 		}
@@ -1957,9 +2169,9 @@ mainLoop:
 		} else {
 			agt.generateCacheFiles(cnc)
 		}
-		// Wait for the next time to run the loop, or exit if we are sutting down
+		// Wait for the next time to run the loop, or exit if we are shutting down
 		select {
-		case <-time.Tick(time.Second * 10):
+		case <-time.After(time.Second * 10):
 		case <-agt.ctx.Done():
 			break mainLoop
 		}
@@ -2142,12 +2354,47 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 		return err
 	}
 
-	err = os.MkdirAll(conf.ConfWriter.RootDir, 0o700)
+	tmpls.birdActive, err = template.ParseFS(templateFS, "templates/bird/active.conf")
+	if err != nil {
+		return err
+	}
+
+	tmpls.birdMaintenance, err = template.ParseFS(templateFS, "templates/bird/maintenance.conf")
 	if err != nil {
 		return err
 	}
 
 	agt := newAgent(ctx, logger, c, tmpls, conf)
+
+	// Leave execute perms active for everyone so e.g. BIRD can read
+	// configuration data that lives here.
+	err = agt.createDirPathIfNeeded(conf.ConfWriter.RootDir, 0, 0, 0o711)
+	if err != nil {
+		return err
+	}
+
+	// Do some setup that can fail prior to starting go routines so we do
+	// not need to handle go routine cleanup in that case.
+	var birdUID, birdGID int
+	if l4lbNode {
+		birdUser, err := user.Lookup(birdUsername)
+		if err != nil {
+			agt.logger.Err(err).Str("username", birdUsername).Msg("unable to lookup user")
+			return err
+		}
+
+		birdUID, err = strconv.Atoi(birdUser.Uid)
+		if err != nil {
+			agt.logger.Err(err).Str("uid", birdUser.Uid).Msg("unable to parse bird uid")
+			return err
+		}
+
+		birdGID, err = strconv.Atoi(birdUser.Gid)
+		if err != nil {
+			agt.logger.Err(err).Str("gid", birdUser.Gid).Msg("unable to parse bird gid")
+			return err
+		}
+	}
 
 	var wg sync.WaitGroup
 
@@ -2158,7 +2405,7 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 
 	if l4lbNode {
 		wg.Add(1)
-		go agt.l4lbNodeLoop(&wg)
+		go agt.l4lbNodeLoop(&wg, birdUID, birdGID)
 	}
 
 	wg.Wait()

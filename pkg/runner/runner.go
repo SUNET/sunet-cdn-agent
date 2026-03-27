@@ -1371,14 +1371,14 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 		return err
 	}
 
-	birdConfPath := filepath.Join(l4lbBirdPath, "conf")
-	err = agt.createDirPathIfNeeded(birdConfPath, birdUID, birdGID, 0o750)
+	birdFiltersPath := filepath.Join(l4lbBirdPath, "filters")
+	err = agt.createDirPathIfNeeded(birdFiltersPath, birdUID, birdGID, 0o750)
 	if err != nil {
-		agt.logger.Err(err).Str("path", birdConfPath).Msg("unable to create bird conf dir")
+		agt.logger.Err(err).Str("path", birdFiltersPath).Msg("unable to create bird filters dir")
 		return err
 	}
 
-	birdConfSymlinkFile := filepath.Join(birdConfPath, "filter.conf")
+	birdConfSymlinkFile := filepath.Join(birdFiltersPath, "filter.conf")
 
 	ip4Networks := []netip.Prefix{}
 	ip6Networks := []netip.Prefix{}
@@ -1408,7 +1408,7 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 	activeFilename := "active.conf"
 	maintenanceFilename := "maintenance.conf"
 
-	birdConfActiveFile := filepath.Join(birdConfPath, activeFilename)
+	birdConfActiveFile := filepath.Join(birdFiltersPath, activeFilename)
 	activeModified, err := agt.createOrUpdateFile(birdConfActiveFile, birdUID, birdGID, 0o640, birdActive)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to build bird active.conf file")
@@ -1421,7 +1421,7 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 		return err
 	}
 
-	birdConfMaintenanceFile := filepath.Join(birdConfPath, maintenanceFilename)
+	birdConfMaintenanceFile := filepath.Join(birdFiltersPath, maintenanceFilename)
 	maintenanceModified, err := agt.createOrUpdateFile(birdConfMaintenanceFile, birdUID, birdGID, 0o640, birdMaintenance)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to build bird maintenance.conf file")

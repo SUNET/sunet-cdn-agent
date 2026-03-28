@@ -2284,6 +2284,8 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 }
 
 func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
+	logger.Info().Msg("starting")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

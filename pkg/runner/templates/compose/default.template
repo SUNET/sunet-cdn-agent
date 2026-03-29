@@ -68,7 +68,10 @@ services:
     tmpfs:
       - /var/lib/varnish/varnishd:exec,uid={{.VarnishUID}}
     # Varnish does not need to listen to any network ports as all communication
-    # between it and haproxy happens over a UNIX socket.
+    # between it and haproxy happens over a UNIX socket. Setting network_mode
+    # to "none" adds some defense-in-depth in case e.g. someone tries to add
+    # VCL config to reach out to the network somehow.
+    network_mode: "none"
     command: [
       "varnishd",
       "-F",

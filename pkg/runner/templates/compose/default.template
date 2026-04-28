@@ -76,7 +76,7 @@ services:
       "varnishd",
       "-F",
       "-E",
-      "/usr/lib/varnish/vmods/libvmod_slash.so",
+      "/usr/lib/varnish/extension-vmods/libvmod_slash.so",
       "-a",
       "/shared/unix-sockets/varnish,PROXY,mode=660",
       "-p",

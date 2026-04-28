@@ -2,7 +2,7 @@ version: "3.9"
 services:
   haproxy:
     # This is the official haproxy-supported container.
-    image: "docker.io/haproxytech/haproxy-debian:2.9.6"
+    image: "{{.HAProxyImage}}"
     volumes:
       - {{.VersionBaseDir}}:/service-versions:ro
       - {{.SharedDir}}:/shared
@@ -49,7 +49,7 @@ services:
     # We build our own varnish with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so
     # it is retained in case of a restart of the container or machine.
-    image: "platform.sunet.se/sunet-cdn/cdn-varnish@sha256:5b4f3111cd8138670fc834f276a31a2c89551910077dfbcdcb69680821937772"
+    image: "{{.VarnishImage}}"
     # Varnish uses a different UID but the same group ID as is used for haproxy
     # so they can share some files like unix sockets.
     user: {{.VarnishUID}}:{{.GID}}

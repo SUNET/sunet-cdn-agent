@@ -61,6 +61,8 @@ type confWriterSettings struct {
 	SystemdSystemDir  string `mapstructure:"systemd_system_dir" validate:"required"`
 	SystemdNetworkDir string `mapstructure:"systemd_network_dir" validate:"required"`
 	CertDir           string `mapstructure:"cert_dir" validate:"required"`
+	VarnishImage      string `mapstructure:"varnish_image" validate:"required"`
+	HAProxyImage      string `mapstructure:"haproxy_image" validate:"required"`
 }
 
 type l4lbNodeSettings struct {
@@ -380,6 +382,8 @@ type cacheComposeConfig struct {
 	HAProxyUID      int64
 	VarnishUID      int64
 	GID             int64
+	HAProxyImage    string
+	VarnishImage    string
 }
 
 type cacheSystemdServiceConfig struct {
@@ -2071,6 +2075,8 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 				HAProxyUID:      haProxyUID,
 				VarnishUID:      varnishUID,
 				GID:             commonGID,
+				HAProxyImage:    agt.conf.ConfWriter.HAProxyImage,
+				VarnishImage:    agt.conf.ConfWriter.VarnishImage,
 			}
 
 			cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, ccc)

@@ -10,6 +10,8 @@ root_dir = "/tmp/sunet-cdn-agent"
 cert_dir = "/etc/letsencrypt/live"
 systemd_system_dir = "/etc/systemd/system"
 systemd_network_dir = "/etc/systemd/network"
+varnish_image = "platform.sunet.se/sunet-cdn/cdn-varnish@sha256:5b4f3111cd8138670fc834f276a31a2c89551910077dfbcdcb69680821937772"
+haproxy_image = "docker.io/haproxytech/haproxy-debian:2.9.6"
 
 [l4lb-node]
 netns = ""

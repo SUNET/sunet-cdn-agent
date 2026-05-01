@@ -1122,6 +1122,55 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 		}
 	}
 
+	// Make sure nftables notrack related rules match the current ephemeral
+	// port range
+	ipLocalPortRangeFile := "/proc/sys/net/ipv4/ip_local_port_range"
+	portRangeBytes, err := os.ReadFile(ipLocalPortRangeFile)
+	if err != nil {
+		return fmt.Errorf("setupNftables: unable to read '%s': %w", ipLocalPortRangeFile, err)
+	}
+
+	ephemeralPortFields := strings.Fields(string(portRangeBytes))
+	if len(ephemeralPortFields) != 2 {
+		return fmt.Errorf("setupNftables: unexpected ephemeral port range contents: '%v'", ephemeralPortFields)
+	}
+
+	lowPort, err := strconv.Atoi(ephemeralPortFields[0])
+	if err != nil {
+		return fmt.Errorf("setupNftables: unable to parse low ephemeral port: %w", err)
+	}
+
+	highPort, err := strconv.Atoi(ephemeralPortFields[1])
+	if err != nil {
+		return fmt.Errorf("setupNftables: unable to parse high ephemeral port: %w", err)
+	}
+
+	notrackInputFilterRule := fmt.Sprintf("add rule inet filter input meta iifname bond0 tcp dport %d-%d tcp sport { 80, 443 } counter accept comment \"notrack origin responses to haproxy\"", lowPort, highPort)
+
+	// Skip conntrack for HTTP(S) traffic, one less state table to fill up under pressure
+	nftablesRules = append(nftablesRules, []string{
+		"# Disable conntrack for HTTP/HTTPS traffic",
+		"table inet raw {",
+		"    chain prerouting {",
+		"        type filter hook prerouting priority raw; policy accept;",
+		"        tcp dport { 80, 443 } notrack # requests from clients to haproxy",
+		"        tcp sport { 80, 443 } notrack # responses from origins to haproxy",
+		"    }",
+		"    chain output {",
+		"        type filter hook output priority raw; policy accept;",
+		"        tcp dport { 80, 443 } notrack # requests from haproxy to origins",
+		"        tcp sport { 80, 443 } notrack # responses from haproxy to clients",
+		"    }",
+		"}",
+		"",
+		"# As we notrack the packets sent from haproxy to origins we need to allow the",
+		"# responses to INPUT. As we dont want anyone that spoofs the source port 80/443",
+		"# to be able to reach any port where we might have a local service listening",
+		"# scope it down to the ephemeral port range (sysctl net.ipv4.ip_local_port_range).",
+		notrackInputFilterRule,
+		"",
+	}...)
+
 	if len(tunnelSources4) > 0 {
 		v4TunnelSourceSet := nftablesSetString(tunnelSources4)
 		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip saddr %s ip protocol ipencap counter accept comment \"sunet-cdn-agent-tunnel4\"", v4TunnelSourceSet))

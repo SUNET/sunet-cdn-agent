@@ -1096,6 +1096,11 @@ func prefixNftablesSetString(prefixes []netip.Prefix) string {
 	return b.String()
 }
 
+type ipRouteInfo struct {
+	Dst string `json:"dst"`
+	Dev string `json:"dev"`
+}
+
 func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir string) error {
 	// Manage rules for receiving tunnel traffic from l4lb nodes:
 	// ip saddr { 10.0.0.10, 10.0.0.11 } ip protocol ipencap counter packets 0 bytes 0 accept comment "sunet-cdn-agent-tunnel4"
@@ -1145,7 +1150,35 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 		return fmt.Errorf("setupNftables: unable to parse high ephemeral port: %w", err)
 	}
 
-	notrackInputFilterRule := fmt.Sprintf("add rule inet filter input meta iifname bond0 tcp dport %d-%d tcp sport { 80, 443 } counter accept comment \"notrack origin responses to haproxy\"", lowPort, highPort)
+	// We expect origin traffic to arrive from the internet, so make the
+	// rule match against the default route interface
+	commandName := "ip"
+	args := strings.Fields("-j route show default")
+	stdout, stderr, err := agentutils.RunCommand(commandName, args...)
+	if err != nil {
+		return fmt.Errorf("setupNftables: unable to inspect default route, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+	}
+
+	var routes []ipRouteInfo
+
+	err = json.Unmarshal([]byte(stdout), &routes)
+	if err != nil {
+		return fmt.Errorf("setupNftables: unable to parse ip route output, stdout: '%s': %w", stdout, err)
+	}
+
+	var ifName string
+	for _, r := range routes {
+		if r.Dst == "default" {
+			ifName = r.Dev
+			break
+		}
+	}
+
+	if ifName == "" {
+		return fmt.Errorf("setupNftables: unable to find default route in ip route output: '%s'", stdout)
+	}
+
+	notrackInputFilterRule := fmt.Sprintf("add rule inet filter input meta iifname %s tcp dport %d-%d tcp sport { 80, 443 } counter accept comment \"notrack origin responses to haproxy\"", ifName, lowPort, highPort)
 
 	// Skip conntrack for HTTP(S) traffic, one less state table to fill up under pressure
 	nftablesRules = append(nftablesRules, []string{

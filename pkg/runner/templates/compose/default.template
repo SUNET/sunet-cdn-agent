@@ -45,6 +45,11 @@ services:
     #sysctls:
     #  - net.ipv4.ip_unprivileged_port_start=80
     # ===
+    # Additional hardening
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
   varnish:
     # We build our own varnish with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so
@@ -92,11 +97,16 @@ services:
       "-r",
       "cc_command,syslog_cli_traffic,vcc_feature,vcl_path,vmod_path",
     ]
-    # Allow io_uring operations expected by slash fellow.
-    security_opt:
-      - seccomp:{{.SeccompDir}}/varnish-slash-seccomp.json
     # Fix error log: "varnish-1  | Info: Child (29) said fellow_io_uring_register_buffers: fellow_io_uring_register_buffers Cannot allocate memory (12)" by setting memlock.
     # Also raise nofile to match what haproxy is running with.
     ulimits:
       memlock: -1
       nofile: 524288
+    # Additional hardening
+    cap_drop: [ALL]
+    security_opt:
+      # Allow io_uring operations expected by slash fellow.
+      - seccomp:/var/lib/sunet-cdn-agent/cache-conf/seccomp/varnish-slash-seccomp.json
+      # Same as haproxy hardening above
+      - no-new-privileges:true
+    read_only: true

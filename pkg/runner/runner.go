@@ -1304,7 +1304,16 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 				for _, cacheNode := range lnc.CacheNodes {
 					weight := 1
 					if cacheNode.Maintenance {
-						weight = 0
+						// Skip this node so it is removed from IPVS rules.
+						// As we run with
+						// net.ipv4.vs.expire_nodest_conn=0
+						// existing connections should
+						// still be sent to this node
+						// even after removal as long
+						// as ipvsadm is aware of a
+						// connection to it. See:
+						// ipvsadm -L -n -c
+						continue
 					}
 
 					if unmapServiceAddr.Is4() {
@@ -1355,7 +1364,16 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 				for _, cacheNode := range lnc.CacheNodes {
 					weight := 1
 					if cacheNode.Maintenance {
-						weight = 0
+						// Skip this node so it is removed from IPVS rules.
+						// As we run with
+						// net.ipv4.vs.expire_nodest_conn=0
+						// existing connections should
+						// still be sent to this node
+						// even after removal as long
+						// as ipvsadm is aware of a
+						// connection to it. See:
+						// ipvsadm -L -n -c
+						continue
 					}
 					if unmapServiceAddr.Is4() {
 						for _, cacheNodeAddress := range cacheNode.Addresses {

@@ -22,6 +22,7 @@ type virtualServiceIdentifier struct {
 
 type virtualServiceSettings struct {
 	schedulingMethod string
+	schedFlags       []string
 }
 
 type realServerSettings struct {
@@ -224,11 +225,16 @@ func appendVirtualService(vs VirtualService, b *strings.Builder) {
 	b.WriteString(" ")
 
 	b.WriteString(vs.schedulingMethod)
+
+	b.WriteString(" ")
+	b.WriteString("-b")
+	b.WriteString(" ")
+	b.WriteString(strings.Join(vs.schedFlags, ","))
 }
 
 // Will output the equivalent ipvsadm command to add the virtual service
 func (vs VirtualService) String() string {
-	// Expected output: -A -t 10.0.0.1:80 -s mh
+	// Expected output: -A -t 10.0.0.1:80 -s mh -b mh-port
 	var b strings.Builder
 
 	b.WriteString("-A")
@@ -252,22 +258,25 @@ func NewVirtualService(protocol string, serviceIP netip.Addr, port uint16, sched
 		},
 		virtualServiceSettings: virtualServiceSettings{
 			schedulingMethod: schedulingMethod,
+			schedFlags:       []string{"mh-port"},
 		},
 	}, nil
 }
 
 func parseVirtualService(ipvsRule string) (VirtualService, error) {
 	// Expected input
-	// -A -t 10.0.0.1:80 -s mh
-	// -A -t [2001:db8:1337::1]:80 -s mh
+	// -A -t 10.0.0.1:80 -s mh -b mh-port
+	// -A -t [2001:db8:1337::1]:80 -s mh -b mh-port
 	commandFlagOffset := 0
 	protocolFlagOffset := 1
 	virtualServiceOffset := 2
 	schedulingFlagOffset := 3
 	schedulingMethodOffset := 4
+	schedFlagsFlagOffset := 5
+	schedFlagsOffset := 6
 
 	ruleFields := strings.Fields(ipvsRule)
-	if len(ruleFields) != 5 {
+	if len(ruleFields) != 7 {
 		return VirtualService{}, fmt.Errorf("unexpected number of fields %d: %s", len(ruleFields), ipvsRule)
 	}
 
@@ -304,6 +313,16 @@ func parseVirtualService(ipvsRule string) (VirtualService, error) {
 	vss := virtualServiceSettings{
 		schedulingMethod: ruleFields[schedulingMethodOffset],
 	}
+
+	if ruleFields[schedFlagsFlagOffset] != "-b" {
+		return VirtualService{}, fmt.Errorf("virtual-service unexpected content for sched-flags flag '%s', only '-b' is expected", ruleFields[schedFlagsFlagOffset])
+	}
+
+	if ruleFields[schedFlagsOffset] == "" {
+		return VirtualService{}, fmt.Errorf("virtual-service unexpected sched-flags '%s'", ruleFields[schedulingMethodOffset])
+	}
+
+	vss.schedFlags = strings.Split(ruleFields[schedFlagsOffset], ",")
 
 	return VirtualService{
 		virtualServiceIdentifier: vsi,
@@ -693,6 +712,24 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 	return nil
 }
 
+func (vss virtualServiceSettings) equals(other virtualServiceSettings) bool {
+	if vss.schedulingMethod != other.schedulingMethod {
+		return false
+	}
+
+	if len(vss.schedFlags) != len(other.schedFlags) {
+		return false
+	}
+
+	for i, schedFlag := range vss.schedFlags {
+		if other.schedFlags[i] != schedFlag {
+			return false
+		}
+	}
+
+	return true
+}
+
 func FindRuleUpdates(loadedRuleSet RuleSet, newRuleSet RuleSet) IPVSUpdates {
 	vsToDelete := []virtualServiceIdentifier{}
 	vsToAdd := []virtualServiceIdentifier{}
@@ -717,7 +754,7 @@ func FindRuleUpdates(loadedRuleSet RuleSet, newRuleSet RuleSet) IPVSUpdates {
 		// If the new virtual-service identifier already exists, see if we need to modify settings
 		for _, loadedVS := range loadedRuleSet.virtualServices {
 			if newVS.virtualServiceIdentifier == loadedVS.virtualServiceIdentifier {
-				if newVS.virtualServiceSettings != loadedVS.virtualServiceSettings {
+				if !newVS.equals(loadedVS.virtualServiceSettings) {
 					vsToEdit = append(vsToEdit, newVS.virtualServiceIdentifier)
 					break
 				}

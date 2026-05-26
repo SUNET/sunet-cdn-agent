@@ -14,5 +14,7 @@ varnish_image = "platform.sunet.se/sunet-cdn/cdn-varnish@sha256:5b4f3111cd813867
 haproxy_image = "docker.io/haproxytech/haproxy-debian:2.9.6"
 
 [l4lb-node]
-netns = ""
+netns = "l4lb"
 netns_conf_dir = "/opt/sunet-cdn/l4lb/conf"
+loopback_ipv4 = 198.51.100.10/32
+loopback_ipv6 = 2001:db8::10/128

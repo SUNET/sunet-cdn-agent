@@ -45,7 +45,6 @@ const (
 type config struct {
 	Manager    managerSettings
 	ConfWriter confWriterSettings
-	L4LBNode   l4lbNodeSettings `mapstructure:"l4lb-node"`
 }
 
 type managerSettings struct {
@@ -65,9 +64,15 @@ type confWriterSettings struct {
 	HAProxyImage      string `mapstructure:"haproxy_image" validate:"required"`
 }
 
+type l4lbConfig struct {
+	L4LBNode l4lbNodeSettings `mapstructure:"l4lb-node"`
+}
+
 type l4lbNodeSettings struct {
-	NetNS        string `mapstructure:"netns"`
+	NetNS        string `mapstructure:"netns" validate:"required"`
 	NetNSConfDir string `mapstructure:"netns_conf_dir" validate:"required"`
+	LoopbackIPv4 string `mapstructure:"loopback_ipv4" validate:"required,ipv4"`
+	LoopbackIPv6 string `mapstructure:"loopback_ipv6" validate:"required,ipv6"`
 }
 
 type modifiedService struct {
@@ -436,6 +441,28 @@ func generateCacheSystemdService(tmpl *template.Template, cssc cacheSystemdServi
 	return b.String(), nil
 }
 
+func generateBirdVars(tmpl *template.Template, varsData birdVarsData) (string, error) {
+	var b strings.Builder
+
+	err := tmpl.Execute(&b, varsData)
+	if err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
+}
+
+func generateBirdFunctions(tmpl *template.Template, functionsData birdFunctionsData) (string, error) {
+	var b strings.Builder
+
+	err := tmpl.Execute(&b, functionsData)
+	if err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
+}
+
 func generateBirdActive(tmpl *template.Template, pfl prefixFilterLists) (string, error) {
 	var b strings.Builder
 
@@ -463,6 +490,8 @@ type templates struct {
 	cacheService        *template.Template
 	slashSeccompFile    *template.Template
 	systemdDummyNetwork *template.Template
+	birdVars            *template.Template
+	birdFunctions       *template.Template
 	birdActive          *template.Template
 	birdMaintenance     *template.Template
 }
@@ -473,6 +502,7 @@ type agent struct {
 	logger     zerolog.Logger
 	templates  templates
 	conf       config
+	l4lbConf   l4lbRuntimeConfig
 }
 
 func sha256SumFile(fn string) (string, error) {
@@ -973,7 +1003,18 @@ type orgIPContainer struct {
 	ServiceIPContainers []serviceIPContainer
 }
 
+type birdVarsData struct {
+	LoopbackIP4 netip.Addr
+	LoopbackIP6 netip.Addr
+}
+
+type birdFunctionsData struct {
+	BirdVarsFile string
+}
+
 type prefixFilterLists struct {
+	LoopbackIP4    netip.Addr
+	LoopbackIP6    netip.Addr
 	IP4NetworkList string
 	IP6NetworkList string
 }
@@ -1006,31 +1047,47 @@ type serviceIPContainer struct {
 //	   }
 //	 }
 //	}
-type netnsConfig map[string]interfaceConfig
+type netnsConfig map[string]interfaceIndex
 
-type interfaceConfig map[string]addressConfig
+// Store interfaceConfig as pointer so we can directly modify it via the map
+type interfaceIndex map[string]*interfaceConfig
 
-type addressConfig map[string][]string
+type interfaceConfig struct {
+	IPv4Loopback string   `json:"loopback_ipv4"`
+	IPv6Loopback string   `json:"loopback_ipv6"`
+	IPv4         []string `json:"ipv4"`
+	IPv6         []string `json:"ipv6"`
+}
 
 func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
-	namespaceName := "l4lb"
+	namespaceName := agt.l4lbConf.NetNS
 	interfaceName := "dummy0"
-	ipv4Key := "ipv4"
-	ipv6Key := "ipv6"
 
 	nsConf := netnsConfig{
-		namespaceName: interfaceConfig{
-			interfaceName: addressConfig{},
+		agt.l4lbConf.NetNS: interfaceIndex{
+			interfaceName: &interfaceConfig{
+				IPv4Loopback: agt.l4lbConf.LoopbackIPv4.String(),
+				IPv6Loopback: agt.l4lbConf.LoopbackIPv6.String(),
+			},
 		},
 	}
+
+	// Configure loopback address used as source for tunnel packets sent to
+	// cache nodes. One could think that "loopback" addresses are
+	// configured on lo0 but it feels cleaner to set all our custom
+	// managed addresses on a dummy interface to keep them separate from
+	// the standard lo0 interface. We still call them "loopback addresses"
+	// in config etc to stick with common network lingo.
+	nsConf[namespaceName][interfaceName].IPv4 = append(nsConf[namespaceName][interfaceName].IPv4, agt.l4lbConf.LoopbackIPv4.String()+"/32")
+	nsConf[namespaceName][interfaceName].IPv6 = append(nsConf[namespaceName][interfaceName].IPv6, agt.l4lbConf.LoopbackIPv6.String()+"/128")
 
 	for _, srvConn := range lnc.Services {
 		for _, address := range srvConn.ServiceIPAddresses {
 			bits := strconv.Itoa(address.Unmap().BitLen())
 			if address.Unmap().Is4() {
-				nsConf[namespaceName][interfaceName][ipv4Key] = append(nsConf[namespaceName][interfaceName][ipv4Key], address.Unmap().String()+"/"+bits)
+				nsConf[namespaceName][interfaceName].IPv4 = append(nsConf[namespaceName][interfaceName].IPv4, address.Unmap().String()+"/"+bits)
 			} else if address.Unmap().Is6() {
-				nsConf[namespaceName][interfaceName][ipv6Key] = append(nsConf[namespaceName][interfaceName][ipv6Key], address.Unmap().String()+"/"+bits)
+				nsConf[namespaceName][interfaceName].IPv6 = append(nsConf[namespaceName][interfaceName].IPv6, address.Unmap().String()+"/"+bits)
 			}
 		}
 	}
@@ -1041,7 +1098,7 @@ func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 		return err
 	}
 
-	netnsConfFile := filepath.Join(agt.conf.L4LBNode.NetNSConfDir, "netns-sunet-cdn-agent.json")
+	netnsConfFile := filepath.Join(agt.l4lbConf.NetNSConfDir, "netns-sunet-cdn-agent.json")
 	netNSModified, err := agt.createOrUpdateFile(netnsConfFile, 0, 0, 0o644, string(b))
 	if err != nil {
 		agt.logger.Err(err).Str("path", netnsConfFile).Msg("unable to write out netns conf file")
@@ -1433,14 +1490,14 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 	// --clear" followed by "ipvsadm --restore" but clearing out all
 	// existing rules is not great since it would cause a glitch for all
 	// services.
-	loadedIPVSRules, err := ipvsadm.GetLoadedRules(agt.logger, agt.conf.L4LBNode.NetNS)
+	loadedIPVSRules, err := ipvsadm.GetLoadedRules(agt.logger, agt.l4lbConf.NetNS)
 	if err != nil {
 		return fmt.Errorf("unable to load ipvsadm rules: %w", err)
 	}
 
 	updates := ipvsadm.FindRuleUpdates(loadedIPVSRules, newIPVSRules)
 
-	err = ipvsadm.UpdateRules(agt.logger, agt.conf.L4LBNode.NetNS, loadedIPVSRules, newIPVSRules, updates)
+	err = ipvsadm.UpdateRules(agt.logger, agt.l4lbConf.NetNS, loadedIPVSRules, newIPVSRules, updates)
 	if err != nil {
 		return fmt.Errorf("unable to update loaded ipvsadm rules: %w", err)
 	}
@@ -1476,6 +1533,55 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 		return err
 	}
 
+	birdVarsPath := filepath.Join(l4lbBirdPath, "vars")
+	err = agt.createDirPathIfNeeded(birdVarsPath, birdUID, birdGID, 0o750)
+	if err != nil {
+		agt.logger.Err(err).Str("path", birdVarsPath).Msg("unable to create bird vars dir")
+		return err
+	}
+
+	varsData := birdVarsData{
+		LoopbackIP4: agt.l4lbConf.LoopbackIPv4,
+		LoopbackIP6: agt.l4lbConf.LoopbackIPv6,
+	}
+
+	bv, err := generateBirdVars(agt.templates.birdVars, varsData)
+	if err != nil {
+		agt.logger.Err(err).Msg("generating l4lb bird vars conf failed")
+		return err
+	}
+
+	birdVarsFile := filepath.Join(birdVarsPath, "vars.conf")
+	varsModified, err := agt.createOrUpdateFile(birdVarsFile, birdUID, birdGID, 0o640, bv)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to build bird vars.conf file")
+		return err
+	}
+
+	birdFunctionsPath := filepath.Join(l4lbBirdPath, "functions")
+	err = agt.createDirPathIfNeeded(birdFunctionsPath, birdUID, birdGID, 0o750)
+	if err != nil {
+		agt.logger.Err(err).Str("path", birdFunctionsPath).Msg("unable to create bird functions dir")
+		return err
+	}
+
+	functionsData := birdFunctionsData{
+		BirdVarsFile: birdVarsFile,
+	}
+
+	bf, err := generateBirdFunctions(agt.templates.birdFunctions, functionsData)
+	if err != nil {
+		agt.logger.Err(err).Msg("generating l4lb bird functions conf failed")
+		return err
+	}
+
+	birdFunctionsFile := filepath.Join(birdFunctionsPath, "functions.conf")
+	functionsModified, err := agt.createOrUpdateFile(birdFunctionsFile, birdUID, birdGID, 0o640, bf)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to build bird functions.conf file")
+		return err
+	}
+
 	birdFiltersPath := filepath.Join(l4lbBirdPath, "filters")
 	err = agt.createDirPathIfNeeded(birdFiltersPath, birdUID, birdGID, 0o750)
 	if err != nil {
@@ -1500,6 +1606,8 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 	}
 
 	pfl := prefixFilterLists{
+		LoopbackIP4:    agt.l4lbConf.LoopbackIPv4,
+		LoopbackIP6:    agt.l4lbConf.LoopbackIPv6,
 		IP4NetworkList: formatFilterPrefixes(ip4Networks),
 		IP6NetworkList: formatFilterPrefixes(ip6Networks),
 	}
@@ -1541,9 +1649,9 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 	}
 
 	// We need to reconfigure bird if either the current state we are in
-	// has had its related config file modified, or if the symlink has been
+	// has had its related config files modified, or if the symlink has been
 	// updated at all.
-	if (maintenanceModified && lnc.L4LBNode.Maintenance) || (activeModified && !lnc.L4LBNode.Maintenance) || lnModified {
+	if varsModified || functionsModified || (maintenanceModified && lnc.L4LBNode.Maintenance) || (activeModified && !lnc.L4LBNode.Maintenance) || lnModified {
 		args := []string{"birdc", "configure"}
 		agt.logger.Info().Strs("cmd", args).Msg("running command")
 		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
@@ -2285,13 +2393,14 @@ mainLoop:
 	}
 }
 
-func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls templates, conf config) agent {
+func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls templates, conf config, l4lbRTConf l4lbRuntimeConfig) agent {
 	return agent{
 		ctx:        ctx,
 		httpClient: c,
 		logger:     logger,
 		templates:  tmpls,
 		conf:       conf,
+		l4lbConf:   l4lbRTConf,
 	}
 }
 
@@ -2390,6 +2499,37 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 	return modified, nil
 }
 
+type l4lbRuntimeConfig struct {
+	NetNS        string
+	NetNSConfDir string
+	LoopbackIPv4 netip.Addr
+	LoopbackIPv6 netip.Addr
+}
+
+func parseL4LBConfig(l4lbConf l4lbNodeSettings) (l4lbRuntimeConfig, error) {
+	err := validate.Struct(l4lbConf)
+	if err != nil {
+		return l4lbRuntimeConfig{}, fmt.Errorf("unable to validate L4LB config: %w", err)
+	}
+
+	parsedIPv4, err := netip.ParseAddr(l4lbConf.LoopbackIPv4)
+	if err != nil {
+		return l4lbRuntimeConfig{}, fmt.Errorf("unable to parse l4lb-node->loopback_ipv4: %w", err)
+	}
+
+	parsedIPv6, err := netip.ParseAddr(l4lbConf.LoopbackIPv6)
+	if err != nil {
+		return l4lbRuntimeConfig{}, fmt.Errorf("unable to parse l4lb-node->loopback_ipv6: %w", err)
+	}
+
+	return l4lbRuntimeConfig{
+		NetNS:        l4lbConf.NetNS,
+		NetNSConfDir: l4lbConf.NetNSConfDir,
+		LoopbackIPv4: parsedIPv4,
+		LoopbackIPv6: parsedIPv6,
+	}, nil
+}
+
 func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 	logger.Info().Msg("starting")
 
@@ -2406,14 +2546,33 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 	}(logger, cancel)
 
 	var conf config
-	err := viper.UnmarshalExact(&conf)
+	err := viper.Unmarshal(&conf)
 	if err != nil {
-		return fmt.Errorf("viper unable to decode into struct: %w", err)
+		return fmt.Errorf("viper unable to decode main conf into struct: %w", err)
 	}
 
 	err = validate.Struct(conf)
 	if err != nil {
 		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	// Do a second pass over the config file if we are an l4lb node, this
+	// way we do not need to set the [l4lb-node] config section on cache
+	// nodes.
+	var l4lbConf l4lbConfig
+	if l4lbNode {
+		err = viper.Unmarshal(&l4lbConf)
+		if err != nil {
+			return fmt.Errorf("viper unable to decode l4lb conf into struct: %w", err)
+		}
+	}
+
+	var l4lbRTConf l4lbRuntimeConfig
+	if l4lbNode {
+		l4lbRTConf, err = parseL4LBConfig(l4lbConf.L4LBNode)
+		if err != nil {
+			return fmt.Errorf("invalid l4lb config: %w", err)
+		}
 	}
 
 	_, err = os.Stat(conf.ConfWriter.SystemdSystemDir)
@@ -2463,6 +2622,16 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 		return err
 	}
 
+	tmpls.birdVars, err = template.ParseFS(templateFS, "templates/bird/vars.conf")
+	if err != nil {
+		return err
+	}
+
+	tmpls.birdFunctions, err = template.ParseFS(templateFS, "templates/bird/functions.conf")
+	if err != nil {
+		return err
+	}
+
 	tmpls.birdActive, err = template.ParseFS(templateFS, "templates/bird/active.conf")
 	if err != nil {
 		return err
@@ -2473,7 +2642,7 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 		return err
 	}
 
-	agt := newAgent(ctx, logger, c, tmpls, conf)
+	agt := newAgent(ctx, logger, c, tmpls, conf, l4lbRTConf)
 
 	// Leave execute perms active for everyone so e.g. BIRD can read
 	// configuration data that lives here.

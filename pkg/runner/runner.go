@@ -474,10 +474,10 @@ func generateBirdActive(tmpl *template.Template, pfl prefixFilterLists) (string,
 	return b.String(), nil
 }
 
-func generateBirdMaintenance(tmpl *template.Template) (string, error) {
+func generateBirdMaintenance(tmpl *template.Template, pfl prefixFilterLists) (string, error) {
 	var b strings.Builder
 
-	err := tmpl.Execute(&b, nil)
+	err := tmpl.Execute(&b, pfl)
 	if err != nil {
 		return "", err
 	}
@@ -1628,7 +1628,7 @@ func (agt *agent) setupBird(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string, bi
 		return err
 	}
 
-	birdMaintenance, err := generateBirdMaintenance(agt.templates.birdMaintenance)
+	birdMaintenance, err := generateBirdMaintenance(agt.templates.birdMaintenance, pfl)
 	if err != nil {
 		agt.logger.Err(err).Msg("generating l4lb bird maintenance conf failed")
 		return err

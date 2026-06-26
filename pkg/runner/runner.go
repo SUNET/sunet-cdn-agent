@@ -1329,13 +1329,13 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 	}
 
 	// ipvsadm --save --numeric output:
-	// -A -t <service-ipv4>:80 -s mh -b mh-port
+	// -A -t <service-ipv4>:80 -s mh -b mh-fallback,mh-port
 	// -a -t <service-ipv4>:80 -r <cache-node-ipv4>:80 -i -w 1 --tun-type ipip
-	// -A -t <service-ipv4>:443 -s mh -b mh-port
+	// -A -t <service-ipv4>:443 -s mh -b mh-fallback,mh-port
 	// -a -t <service-ipv4>:443 -r <cache-node-ipv4>:443 -i -w 1 --tun-type ipip
-	// -A -t [<service-ipv6>]:80 -s mh -b mh-port
+	// -A -t [<service-ipv6>]:80 -s mh -b mh-fallback,mh-port
 	// -a -t [<service-ipv6>]:80 -r [<cache-node-ipv6>]:80 -i -w 1 --tun-type ipip
-	// -A -t [<service-ipv6>]:443 -s mh -b mh-port
+	// -A -t [<service-ipv6>]:443 -s mh -b mh-fallback,mh-port
 	// -a -t [<service-ipv6]:443 -r [<cache-node-ipv6>]:443 -i -w 1 --tun-type ipip
 
 	// Store rules in a slice to track ordering

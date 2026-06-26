@@ -234,7 +234,7 @@ func appendVirtualService(vs VirtualService, b *strings.Builder) {
 
 // Will output the equivalent ipvsadm command to add the virtual service
 func (vs VirtualService) String() string {
-	// Expected output: -A -t 10.0.0.1:80 -s mh -b mh-port
+	// Expected output: -A -t 10.0.0.1:80 -s mh -b mh-fallback,mh-port
 	var b strings.Builder
 
 	b.WriteString("-A")
@@ -258,15 +258,15 @@ func NewVirtualService(protocol string, serviceIP netip.Addr, port uint16, sched
 		},
 		virtualServiceSettings: virtualServiceSettings{
 			schedulingMethod: schedulingMethod,
-			schedFlags:       []string{"mh-port"},
+			schedFlags:       []string{"mh-fallback", "mh-port"},
 		},
 	}, nil
 }
 
 func parseVirtualService(ipvsRule string) (VirtualService, error) {
 	// Expected input
-	// -A -t 10.0.0.1:80 -s mh -b mh-port
-	// -A -t [2001:db8:1337::1]:80 -s mh -b mh-port
+	// -A -t 10.0.0.1:80 -s mh -b mh-fallback,mh-port
+	// -A -t [2001:db8:1337::1]:80 -s mh -b mh-fallback,mh-port
 	commandFlagOffset := 0
 	protocolFlagOffset := 1
 	virtualServiceOffset := 2

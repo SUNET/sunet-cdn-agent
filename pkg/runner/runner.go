@@ -1154,11 +1154,6 @@ func prefixNftablesSetString(prefixes []netip.Prefix) string {
 	return b.String()
 }
 
-type ipRouteInfo struct {
-	Dst string `json:"dst"`
-	Dev string `json:"dev"`
-}
-
 func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir string) error {
 	// Manage rules for receiving tunnel traffic from l4lb nodes:
 	// ip saddr { 10.0.0.10, 10.0.0.11 } ip protocol ipencap counter packets 0 bytes 0 accept comment "sunet-cdn-agent-tunnel4"
@@ -1185,81 +1180,23 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 		}
 	}
 
-	// Make sure nftables notrack related rules match the current ephemeral
-	// port range
-	ipLocalPortRangeFile := "/proc/sys/net/ipv4/ip_local_port_range"
-	portRangeBytes, err := os.ReadFile(ipLocalPortRangeFile)
-	if err != nil {
-		return fmt.Errorf("setupNftables: unable to read '%s': %w", ipLocalPortRangeFile, err)
-	}
-
-	ephemeralPortFields := strings.Fields(string(portRangeBytes))
-	if len(ephemeralPortFields) != 2 {
-		return fmt.Errorf("setupNftables: unexpected ephemeral port range contents: '%v'", ephemeralPortFields)
-	}
-
-	lowPort, err := strconv.Atoi(ephemeralPortFields[0])
-	if err != nil {
-		return fmt.Errorf("setupNftables: unable to parse low ephemeral port: %w", err)
-	}
-
-	highPort, err := strconv.Atoi(ephemeralPortFields[1])
-	if err != nil {
-		return fmt.Errorf("setupNftables: unable to parse high ephemeral port: %w", err)
-	}
-
-	// We expect origin traffic to arrive from the internet, so make the
-	// rule match against the default route interface
-	commandName := "ip"
-	args := strings.Fields("-j route show default")
-	stdout, stderr, err := agentutils.RunCommand(commandName, args...)
-	if err != nil {
-		return fmt.Errorf("setupNftables: unable to inspect default route, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
-	}
-
-	var routes []ipRouteInfo
-
-	err = json.Unmarshal([]byte(stdout), &routes)
-	if err != nil {
-		return fmt.Errorf("setupNftables: unable to parse ip route output, stdout: '%s': %w", stdout, err)
-	}
-
-	var ifName string
-	for _, r := range routes {
-		if r.Dst == "default" {
-			ifName = r.Dev
-			break
-		}
-	}
-
-	if ifName == "" {
-		return fmt.Errorf("setupNftables: unable to find default route in ip route output: '%s'", stdout)
-	}
-
-	notrackInputFilterRule := fmt.Sprintf("add rule inet filter input meta iifname %s tcp dport %d-%d tcp sport { 80, 443 } counter accept comment \"notrack origin responses to haproxy\"", ifName, lowPort, highPort)
-
 	// Skip conntrack for HTTP(S) traffic, one less state table to fill up under pressure
 	nftablesRules = append(nftablesRules, []string{
-		"# Disable conntrack for HTTP/HTTPS traffic",
+		"# Disable conntrack for HTTP/HTTPS traffic from internet clients which is one",
+		"# less state table to fill up under e.g. SYN-flood pressure. We still use",
+		"# conntrack for origin requests from haproxy since these requests are more",
+		"# under our control and also since origins use user defined ports that are not",
+		"# easily matched with static rules.",
 		"table inet raw {",
 		"    chain prerouting {",
 		"        type filter hook prerouting priority raw; policy accept;",
 		"        tcp dport { 80, 443 } notrack comment \"requests from clients to haproxy\"",
-		"        tcp sport { 80, 443 } notrack comment \"responses from origins to haproxy\"",
 		"    }",
 		"    chain output {",
 		"        type filter hook output priority raw; policy accept;",
-		"        tcp dport { 80, 443 } notrack comment \"requests from haproxy to origins\"",
 		"        tcp sport { 80, 443 } notrack comment \"responses from haproxy to clients\"",
 		"    }",
 		"}",
-		"",
-		"# As we notrack the packets sent from haproxy to origins we need to allow the",
-		"# responses to INPUT. As we dont want anyone that spoofs the source port 80/443",
-		"# to be able to reach any port where we might have a local service listening",
-		"# scope it down to the ephemeral port range (sysctl net.ipv4.ip_local_port_range).",
-		notrackInputFilterRule,
-		"",
 	}...)
 
 	if len(tunnelSources4) > 0 {
@@ -1288,12 +1225,12 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 
 	if len(serviceNetworks4) > 0 {
 		serviceNetworkSet4 := prefixNftablesSetString(serviceNetworks4)
-		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname tunl0 ip daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-service4\"", serviceNetworkSet4))
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname tunl0 ip daddr %s tcp dport { 80, 443 } ct state untracked counter accept comment \"sunet-cdn-agent-service4\"", serviceNetworkSet4))
 	}
 
 	if len(serviceNetworks6) > 0 {
 		serviceNetworkSet6 := prefixNftablesSetString(serviceNetworks6)
-		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip6 daddr %s tcp dport { 80, 443 } counter accept comment \"sunet-cdn-agent-service6\"", serviceNetworkSet6))
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input meta iifname ip6tnl0 ip6 daddr %s tcp dport { 80, 443 } ct state untracked counter accept comment \"sunet-cdn-agent-service6\"", serviceNetworkSet6))
 	}
 
 	if len(nftablesRules) > 0 {

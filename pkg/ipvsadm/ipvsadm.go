@@ -251,15 +251,11 @@ func NewVirtualService(protocol string, serviceIP netip.Addr, port uint16, sched
 	}
 
 	return VirtualService{
-		virtualServiceIdentifier: virtualServiceIdentifier{
-			protocol: protocol,
-			address:  serviceIP,
-			port:     uint16(port),
-		},
-		virtualServiceSettings: virtualServiceSettings{
-			schedulingMethod: schedulingMethod,
-			schedFlags:       []string{"mh-fallback", "mh-port"},
-		},
+		protocol:         protocol,
+		address:          serviceIP,
+		port:             uint16(port),
+		schedulingMethod: schedulingMethod,
+		schedFlags:       []string{"mh-fallback", "mh-port"},
 	}, nil
 }
 
@@ -364,19 +360,15 @@ func NewRealServer(protocol string, serviceIP netip.Addr, servicePort uint16, se
 	}
 
 	return RealServer{
-		realServerIdentifier: realServerIdentifier{
-			virtualServiceIdentifier: virtualServiceIdentifier{
-				protocol: protocol,
-				address:  serviceIP,
-				port:     uint16(servicePort),
-			},
-			address: serverIP,
-			port:    serverPort,
+		virtualServiceIdentifier: virtualServiceIdentifier{
+			protocol: protocol,
+			address:  serviceIP,
+			port:     uint16(servicePort),
 		},
-		realServerSettings: realServerSettings{
-			weight:           weigth,
-			forwardingMethod: forwardingMethod,
-		},
+		address:          serverIP,
+		port:             serverPort,
+		weight:           weigth,
+		forwardingMethod: forwardingMethod,
 	}, nil
 }
 

@@ -40,6 +40,11 @@ const (
 	nodeTypeCache = "cache"
 	vclFilename   = "sunet-cdn.vcl"
 	birdUsername  = "bird"
+	// "meta skuid >= tenantUIDRangeBase" selects exactly the per-service
+	// processes (just haproxy is affected, varnish shares the range but
+	// runs with network_mode "none" and never emits packets in the host netns.
+	// The actual range is defined in the database schema of sunet-cdn-manager.
+	tenantUIDRangeBase = 1000010000
 )
 
 type config struct {
@@ -1195,6 +1200,56 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 		"    chain output {",
 		"        type filter hook output priority raw; policy accept;",
 		"        tcp sport { 80, 443 } notrack comment \"responses from haproxy to clients\"",
+		"    }",
+		"}",
+		"",
+		"# Block tenant processes from connecting to local services (e.g. setting an origin host pointing to a DNS name that resolves to 127.0.0.1)",
+		"# If adding entries here keep it in sync with the addressIsValid() function in sunet-cdn-manager",
+		"table inet cdn_egress {",
+		"    set cdn_blocked_origins_v4 {",
+		"        type ipv4_addr",
+		"        flags interval",
+		"        elements = {",
+		"            127.0.0.0/8, # loopback",
+		"            10.0.0.0/8, # private, RFC1918",
+		"            172.16.0.0/12, # private, RFC1918",
+		"            192.168.0.0/16, # private, RFC1918",
+		"            0.0.0.0/8, # \"this network\"",
+		"            100.64.0.0/10, # CGNAT, RFC 6598",
+		"            169.254.0.0/16, # link-local unicast, RFC 3927",
+		"            192.0.0.0/24, # IETF protocol assignments",
+		"            192.88.99.0/24, # 6to4 relay anycast",
+		"            198.18.0.0/15, # benchmarking, RFC 2544",
+		"            224.0.0.0/4, # multicast",
+		"            240.0.0.0/4, # reserved",
+		"        }",
+		"    }",
+		"    set cdn_blocked_origins_v6 {",
+		"        type ipv6_addr",
+		"        flags interval",
+		"        elements = {",
+		"            ::1/128, # loopback",
+		"            ff00::/8, # multicast",
+		"            fe80::/10, # link-local unicast",
+		"            64:ff9b::/96, # NAT64 well-known prefix",
+		"            64:ff9b:1::/48, # local-use translation",
+		"            100::/64, # RFC 6666 discard-only",
+		"            5f00::/16, # RFC 9602 SRv6 SIDs",
+		"            fc00::/7, # unique local address (ULA)",
+		"            fec0::/10, # deprecated site-local",
+		"            2001:2::/48, # benchmarking, RFC 5180",
+		"            2001::/32, # Teredo",
+		"            2002::/16, # 6to4",
+		"        }",
+		"    }",
+		"    chain output {",
+		"        type filter hook output priority 0; policy accept;",
+		fmt.Sprintf("        ct state new meta skuid >= %d meta l4proto tcp ip daddr @cdn_blocked_origins_v4 counter reject with tcp reset", tenantUIDRangeBase),
+		fmt.Sprintf("        ct state new meta skuid >= %d ip daddr @cdn_blocked_origins_v4 counter reject", tenantUIDRangeBase),
+		fmt.Sprintf("        ct state new meta skuid >= %d meta l4proto tcp ip6 daddr @cdn_blocked_origins_v6 counter reject with tcp reset", tenantUIDRangeBase),
+		fmt.Sprintf("        ct state new meta skuid >= %d ip6 daddr @cdn_blocked_origins_v6 counter reject", tenantUIDRangeBase),
+		fmt.Sprintf("        ct state new meta skuid >= %d meta l4proto tcp fib daddr type { local, broadcast, anycast } counter reject with tcp reset", tenantUIDRangeBase),
+		fmt.Sprintf("        ct state new meta skuid >= %d fib daddr type { local, broadcast, anycast } counter reject", tenantUIDRangeBase),
 		"    }",
 		"}",
 	}...)

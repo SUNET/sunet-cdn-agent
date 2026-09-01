@@ -32,7 +32,7 @@ func main() {
 	logger := zerolog.New(os.Stderr).With().
 		Str("service", "sunet-cdn-agent").
 		Str("hostname", hostname).
-		Str("server_version", version).
+		Str("agent_version", version).
 		Str("go_version", runtime.Version()).
 		Timestamp().Caller().Logger()
 

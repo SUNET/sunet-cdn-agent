@@ -1244,6 +1244,7 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 		"    }",
 		"    chain output {",
 		"        type filter hook output priority 0; policy accept;",
+		fmt.Sprintf("        ct state new meta skuid >= %d meta l4proto udp ip daddr 127.0.0.1 udp dport 5140 @th,64,8 0x3c counter accept comment \"syslog to local collector\"", tenantUIDRangeBase),
 		fmt.Sprintf("        ct state new meta skuid >= %d meta l4proto tcp ip daddr @cdn_blocked_origins_v4 counter reject with tcp reset", tenantUIDRangeBase),
 		fmt.Sprintf("        ct state new meta skuid >= %d ip daddr @cdn_blocked_origins_v4 counter reject", tenantUIDRangeBase),
 		fmt.Sprintf("        ct state new meta skuid >= %d meta l4proto tcp ip6 daddr @cdn_blocked_origins_v6 counter reject with tcp reset", tenantUIDRangeBase),

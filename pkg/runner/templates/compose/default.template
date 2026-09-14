@@ -49,6 +49,8 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: true
+    dns:
+      - 127.53.53.53
   varnish:
     # We build our own varnish with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so

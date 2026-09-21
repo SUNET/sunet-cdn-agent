@@ -41,7 +41,7 @@ const (
 	vclFilename   = "sunet-cdn.vcl"
 	birdUsername  = "bird"
 	// "meta skuid >= tenantUIDRangeBase" selects exactly the per-service
-	// processes (just haproxy is affected, varnish shares the range but
+	// processes (just haproxy is affected, vinyl shares the range but
 	// runs with network_mode "none" and never emits packets in the host netns.
 	// The actual range is defined in the database schema of sunet-cdn-manager.
 	tenantUIDRangeBase = 1000010000
@@ -65,7 +65,7 @@ type confWriterSettings struct {
 	SystemdSystemDir  string `mapstructure:"systemd_system_dir" validate:"required"`
 	SystemdNetworkDir string `mapstructure:"systemd_network_dir" validate:"required"`
 	CertDir           string `mapstructure:"cert_dir" validate:"required"`
-	VarnishImage      string `mapstructure:"varnish_image" validate:"required"`
+	VinylImage        string `mapstructure:"vinyl_image" validate:"required"`
 	HAProxyImage      string `mapstructure:"haproxy_image" validate:"required"`
 }
 
@@ -82,10 +82,10 @@ type l4lbNodeSettings struct {
 
 type modifiedService struct {
 	haproxy bool
-	varnish bool
+	vinyl   bool
 }
 
-// JSON format from "vcl.list -j" described here: https://varnish-cache.org/docs/trunk/reference/varnish-cli.html#json
+// JSON format from "vcl.list -j" described here: https://vinyl-cache.org/docs/trunk/reference/vinyl-cli.html#json
 //
 // [ 2, ["vcl.list", "-j"], 1742022002.443,
 //
@@ -122,7 +122,7 @@ type loadedVcl struct {
 }
 
 // Implement custom unmarshaller since the JSON structure outputted by
-// varnishadm is a list of different types which makes things a bit more
+// vinyladm is a list of different types which makes things a bit more
 // cumbersome to deal with.
 func (vclList *vclListContent) UnmarshalJSON(b []byte) error {
 	var tmp []json.RawMessage
@@ -390,10 +390,10 @@ type cacheComposeConfig struct {
 	HAProxyLocalDir string
 	CertsPrivateDir string
 	HAProxyUID      int64
-	VarnishUID      int64
+	VinylUID        int64
 	GID             int64
 	HAProxyImage    string
-	VarnishImage    string
+	VinylImage      string
 }
 
 type cacheSystemdServiceConfig struct {
@@ -793,16 +793,16 @@ func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}
 }
 
 func (agt *agent) loadNewVcl(containerName string) error {
-	stdout, stderr, err := agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.list", "-j")
+	stdout, stderr, err := agentutils.RunCommand("docker", "exec", containerName, "vinyladm", "vcl.list", "-j")
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.list -j")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call vinyladm vcl.list -j")
 		return err
 	}
 
 	vlc := vclListContent{}
 	err = json.Unmarshal([]byte(stdout), &vlc)
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Msg("unable to parse varnishadm vcl.list -j")
+		agt.logger.Err(err).Str("container_name", containerName).Msg("unable to parse vinyladm vcl.list -j")
 		return err
 	}
 
@@ -831,19 +831,19 @@ func (agt *agent) loadNewVcl(containerName string) error {
 		}
 	}
 	if vclConfigName == "" {
-		agt.logger.Error().Str("container_name", containerName).Msg("unable to generate unused varnish vcl name")
+		agt.logger.Error().Str("container_name", containerName).Msg("unable to generate unused vcl name")
 		return err
 	}
 
-	stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.load", vclConfigName, vclFilename)
+	stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "vinyladm", "vcl.load", vclConfigName, vclFilename)
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.load")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call vcl.load")
 		return err
 	}
 
-	stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.use", vclConfigName)
+	stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "vinyladm", "vcl.use", vclConfigName)
 	if err != nil {
-		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.use")
+		agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call vcl.use")
 		return err
 	}
 
@@ -862,9 +862,9 @@ func (agt *agent) loadNewVcl(containerName string) error {
 				Str("vcl_status", lv.Status).
 				Int64("vcl_busy", lv.Busy).
 				Msg("discarding unused vcl")
-			stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "varnishadm", "vcl.discard", lv.Name)
+			stdout, stderr, err = agentutils.RunCommand("docker", "exec", containerName, "vinyladm", "vcl.discard", lv.Name)
 			if err != nil {
-				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call varnishadm vcl.discard")
+				agt.logger.Err(err).Str("container_name", containerName).Str("stdout", stdout).Str("stderr", stderr).Msg("unable to call vcl.discard")
 				return err
 			}
 		}
@@ -891,7 +891,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	// Expected output is something like this:
 	// ===
 	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
-	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-varnish-1
+	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-vinyl-1
 	// ===
 	stdout, stderr, err := agentutils.RunCommand("docker", "ps", "--format", "{{.Names}}")
 	if err != nil {
@@ -943,8 +943,8 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 				if ms.haproxy && strings.Contains(containerName, "-haproxy-") {
 					agt.logger.Info().Str("container_name", containerName).Msg("active haproxy config changed, needs to reload")
 					containerActiveConfigChanged[containerName] = struct{}{}
-				} else if ms.varnish && strings.Contains(containerName, "-varnish-") {
-					agt.logger.Info().Str("container_name", containerName).Msg("active varnish config changed, needs to reload")
+				} else if ms.vinyl && strings.Contains(containerName, "-vinyl-") {
+					agt.logger.Info().Str("container_name", containerName).Msg("active vinyl config changed, needs to reload")
 					containerActiveConfigChanged[containerName] = struct{}{}
 				}
 			}
@@ -985,7 +985,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	for _, containerName := range sortedMergedContainers {
 		// Do the right thing based on what type of container needs a reload.
 		switch {
-		case strings.Contains(containerName, "-varnish-"):
+		case strings.Contains(containerName, "-vinyl-"):
 			err := agt.loadNewVcl(containerName)
 			if err != nil {
 				continue
@@ -1907,7 +1907,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 		return
 	}
 
-	seccompFile := filepath.Join(seccompDir, "varnish-slash-seccomp.json")
+	seccompFile := filepath.Join(seccompDir, "vinyl-slash-seccomp.json")
 	_, err = agt.createOrUpdateFile(seccompFile, 0, 0, 0o600, slashSeccompContent)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create slash seccomp file")
@@ -1959,9 +1959,9 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 	modifiedActiveConfigs := map[string]map[string]modifiedService{}
 
 	// Expected directory structure:
-	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/varnish/sunet-cdn.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/vinyl/sunet-cdn.vcl
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/1/haproxy/haproxy.cfg
-	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/varnish/sunet-cdn.vcl
+	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/vinyl/sunet-cdn.vcl
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/2/haproxy/haproxy.cfg
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/service-versions/active -> 2
 	// /opt/sunet-cdn-agent/conf/orgs/org-uuid/services/service-uuid/volumes/shared/work
@@ -2057,7 +2057,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 
 			commonGID := service.UIDRangeFirst
 			haProxyUID := service.UIDRangeFirst + 1
-			varnishUID := service.UIDRangeFirst + 2
+			vinylUID := service.UIDRangeFirst + 2
 
 			servicePath := getServicePath(orgIDPath)
 			err = agt.createDirPathIfNeeded(servicePath, 0, 0, 0o700)
@@ -2174,15 +2174,15 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					return
 				}
 
-				varnishPath := filepath.Join(versionPath, "varnish")
-				err = agt.createDirPathIfNeeded(varnishPath, int(varnishUID), 0, 0o700)
+				vinylPath := filepath.Join(versionPath, "vinyl")
+				err = agt.createDirPathIfNeeded(vinylPath, int(vinylUID), 0, 0o700)
 				if err != nil {
-					agt.logger.Err(err).Msg("unable to create varnish dir")
+					agt.logger.Err(err).Msg("unable to create vinyl dir")
 					return
 				}
 
-				varnishVCLFile := filepath.Join(varnishPath, vclFilename)
-				varnishVCLChanged, err := agt.createOrUpdateFile(varnishVCLFile, int(varnishUID), 0, 0o600, version.VCL)
+				vinylVCLFile := filepath.Join(vinylPath, vclFilename)
+				vinylVCLChanged, err := agt.createOrUpdateFile(vinylVCLFile, int(vinylUID), 0, 0o600, version.VCL)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build VCL conf file")
 					return
@@ -2211,18 +2211,18 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					// even if the active symlink has not
 					// been changed. This can happen if we
 					// modify any of the config templates.
-					if haProxyConfChanged || varnishVCLChanged {
+					if haProxyConfChanged || vinylVCLChanged {
 						if _, ok := modifiedActiveConfigs[org.ID.String()]; !ok {
 							modifiedActiveConfigs[org.ID.String()] = map[string]modifiedService{
 								service.ID.String(): {
 									haproxy: haProxyConfChanged,
-									varnish: varnishVCLChanged,
+									vinyl:   vinylVCLChanged,
 								},
 							}
 						} else {
 							modifiedActiveConfigs[org.ID.String()][service.ID.String()] = modifiedService{
 								haproxy: haProxyConfChanged,
-								varnish: varnishVCLChanged,
+								vinyl:   vinylVCLChanged,
 							}
 						}
 					}
@@ -2231,7 +2231,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 			}
 
 			cachePath := filepath.Join(volumesPath, "cache")
-			err = agt.createDirPathIfNeeded(cachePath, int(varnishUID), 0, 0o700)
+			err = agt.createDirPathIfNeeded(cachePath, int(vinylUID), 0, 0o700)
 			if err != nil {
 				agt.logger.Err(err).Str("path", cachePath).Msg("unable to create dir")
 				return
@@ -2260,10 +2260,10 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 				HAProxyLocalDir: haproxyLocalPath,
 				CertsPrivateDir: certsPrivatePath,
 				HAProxyUID:      haProxyUID,
-				VarnishUID:      varnishUID,
+				VinylUID:        vinylUID,
 				GID:             commonGID,
 				HAProxyImage:    agt.conf.ConfWriter.HAProxyImage,
-				VarnishImage:    agt.conf.ConfWriter.VarnishImage,
+				VinylImage:      agt.conf.ConfWriter.VinylImage,
 			}
 
 			cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, ccc)
@@ -2590,7 +2590,7 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 		return err
 	}
 
-	tmpls.slashSeccompFile, err = template.ParseFS(templateFS, "templates/seccomp/varnish-slash-seccomp.json")
+	tmpls.slashSeccompFile, err = template.ParseFS(templateFS, "templates/seccomp/vinyl-slash-seccomp.json")
 	if err != nil {
 		return err
 	}

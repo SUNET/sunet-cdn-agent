@@ -51,14 +51,14 @@ services:
     read_only: true
     dns:
       - 127.53.53.53
-  varnish:
-    # We build our own varnish with the slash vmod present. We use the slash
+  vinyl:
+    # We build our own vinyl with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so
     # it is retained in case of a restart of the container or machine.
-    image: "{{.VarnishImage}}"
-    # Varnish uses a different UID but the same group ID as is used for haproxy
+    image: "{{.VinylImage}}"
+    # Vinyl uses a different UID but the same group ID as is used for haproxy
     # so they can share some files like unix sockets.
-    user: {{.VarnishUID}}:{{.GID}}
+    user: {{.VinylUID}}:{{.GID}}
     volumes:
       - {{.VersionBaseDir}}:/service-versions:ro
       - {{.SharedDir}}:/shared
@@ -71,22 +71,23 @@ services:
     # ===
     # Using the subfolder "varnishd" is an updated expectation, see
     # https://github.com/varnish/docker-varnish/issues/51
+    # We now run vinyl-cache instead of varnish but the same reasoning holds.
     tmpfs:
-      - /var/lib/varnish/varnishd:exec,uid={{.VarnishUID}},mode=0750
-    # Varnish does not need to listen to any network ports as all communication
+      - /var/lib/vinyl-cache/vinyld:exec,uid={{.VinylUID}},mode=0750
+    # Vinyl does not need to listen to any network ports as all communication
     # between it and haproxy happens over a UNIX socket. Setting network_mode
     # to "none" adds some defense-in-depth in case e.g. someone tries to add
     # VCL config to reach out to the network somehow.
     network_mode: "none"
     command: [
-      "varnishd",
+      "vinyld",
       "-F",
       "-E",
-      "/usr/lib/varnish/extension-vmods/libvmod_slash.so",
+      "/usr/lib/vinyl-cache/extension-vmods/libvmod_slash.so",
       "-a",
-      "/shared/unix-sockets/varnish,PROXY,mode=660",
+      "/shared/unix-sockets/vinyl,PROXY,mode=660",
       "-p",
-      "vcl_path=/service-versions/active/varnish",
+      "vcl_path=/service-versions/active/vinyl",
       "-f",
       "sunet-cdn.vcl",
       "-p",
@@ -107,7 +108,7 @@ services:
     cap_drop: [ALL]
     security_opt:
       # Allow io_uring operations expected by slash fellow.
-      - seccomp:/var/lib/sunet-cdn-agent/cache-conf/seccomp/varnish-slash-seccomp.json
+      - seccomp:/var/lib/sunet-cdn-agent/cache-conf/seccomp/vinyl-slash-seccomp.json
       # Same as haproxy hardening above
       - no-new-privileges:true
     read_only: true

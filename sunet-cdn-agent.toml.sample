@@ -10,7 +10,7 @@ root_dir = "/tmp/sunet-cdn-agent"
 cert_dir = "/etc/letsencrypt/live"
 systemd_system_dir = "/etc/systemd/system"
 systemd_network_dir = "/etc/systemd/network"
-vinyl_image = "platform.sunet.se/sunet-cdn/cdn-vinyl@sha256:d7993cd531fc0f194ce1f1f480b6e3b15647931d7e7161608e635317b2391134"
+vinyl_image = "platform.sunet.se/sunet-cdn/cdn-vinyl@sha256:910c3ffed7d883e5fc9a4e6f53db05fda99e28534f8c0abfe9e289b99e69ff0f"
 haproxy_image = "docker.io/haproxytech/haproxy-debian:2.9.6"
 
 [l4lb-node]

@@ -16,5 +16,6 @@ haproxy_image = "docker.io/haproxytech/haproxy-debian:2.9.6"
 [l4lb-node]
 netns = "l4lb"
 netns_conf_dir = "/opt/sunet-cdn/l4lb/conf"
+sunet_xdpd_conf_dir = "/etc/sunet-xdpd/conf.d"
 loopback_ipv4 = 198.51.100.10/32
 loopback_ipv6 = 2001:db8::10/128

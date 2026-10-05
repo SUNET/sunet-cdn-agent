@@ -74,10 +74,11 @@ type l4lbConfig struct {
 }
 
 type l4lbNodeSettings struct {
-	NetNS        string `mapstructure:"netns" validate:"required"`
-	NetNSConfDir string `mapstructure:"netns_conf_dir" validate:"required"`
-	LoopbackIPv4 string `mapstructure:"loopback_ipv4" validate:"required,ipv4"`
-	LoopbackIPv6 string `mapstructure:"loopback_ipv6" validate:"required,ipv6"`
+	NetNS            string `mapstructure:"netns" validate:"required"`
+	NetNSConfDir     string `mapstructure:"netns_conf_dir" validate:"required"`
+	SunetXDPdConfDir string `mapstructure:"sunet_xdpd_conf_dir" validate:"required"`
+	LoopbackIPv4     string `mapstructure:"loopback_ipv4" validate:"required,ipv4"`
+	LoopbackIPv6     string `mapstructure:"loopback_ipv6" validate:"required,ipv6"`
 }
 
 type modifiedService struct {
@@ -1054,6 +1055,55 @@ type serviceIPContainer struct {
 //	}
 type netnsConfig map[string]interfaceIndex
 
+//	{
+//	  "interfaces": {
+//	    "lo": {
+//	      "bpf_drop_filters": [
+//	        {
+//	          "description": "Drop some TCP",
+//	          "expr": "tcp dst port 1337"
+//	          "action": "drop",
+//	        },
+//	        {
+//	          "description": "Monitor some UDP",
+//	          "expr": "udp dst port 9999",
+//	          "action": "drop",
+//	          "monitor": true
+//	        }
+//	      ]
+//	    },
+//	    "ens3": {
+//	      "bpf_drop_filters": [
+//	        {
+//	          "description": "Drop some TCP",
+//	          "action": "drop",
+//	          "expr": "tcp dst port 1338"
+//	        },
+//	        {
+//	          "description": "Monitor some UDP",
+//	          "expr": "udp dst port 9998",
+//	          "action": "drop",
+//	          "monitor": true
+//	        }
+//	      ]
+//	    }
+//	  }
+//	}
+type sunetXDPdConfig struct {
+	Interfaces map[string]xdpIfConfig `json:"interfaces"`
+}
+
+type xdpIfConfig struct {
+	BPFFilters []bpfFilter `json:"bpf_filters"`
+}
+
+type bpfFilter struct {
+	Description string `json:"description"`
+	Expr        string `json:"expr"`
+	Action      string `json:"action"`
+	Monitor     bool   `json:"monitor,omitempty"`
+}
+
 // Store interfaceConfig as pointer so we can directly modify it via the map
 type interfaceIndex map[string]*interfaceConfig
 
@@ -1079,9 +1129,9 @@ func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 
 	// Configure loopback address used as source for tunnel packets sent to
 	// cache nodes. One could think that "loopback" addresses are
-	// configured on lo0 but it feels cleaner to set all our custom
+	// configured on lo but it feels cleaner to set all our custom
 	// managed addresses on a dummy interface to keep them separate from
-	// the standard lo0 interface. We still call them "loopback addresses"
+	// the standard lo interface. We still call them "loopback addresses"
 	// in config etc to stick with common network lingo.
 	nsConf[namespaceName][interfaceName].IPv4 = append(nsConf[namespaceName][interfaceName].IPv4, agt.l4lbConf.LoopbackIPv4.String()+"/32")
 	nsConf[namespaceName][interfaceName].IPv6 = append(nsConf[namespaceName][interfaceName].IPv6, agt.l4lbConf.LoopbackIPv6.String()+"/128")
@@ -1112,6 +1162,155 @@ func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 
 	if netNSModified {
 		args := []string{"systemctl", "restart", "sunet-l4lb-namespace.service"}
+		agt.logger.Info().Strs("cmd", args).Msg("running command")
+		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
+		if err != nil {
+			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
+			return fmt.Errorf("failed to run %q: %w", strings.Join(args, " "), err)
+		}
+	}
+
+	return nil
+}
+
+// [
+//
+//	{
+//	  "ifindex": 1,
+//	  "ifname": "lo",
+//	  "flags": [
+//	    "LOOPBACK",
+//	    "UP",
+//	    "LOWER_UP"
+//	  ],
+//	  [...]
+//	},
+//	{
+//	  "ifindex": 2,
+//	  "ifname": "dummy0",
+//	  "flags": [
+//	    "BROADCAST",
+//	    "NOARP",
+//	    "UP",
+//	    "LOWER_UP"
+//	  ],
+//	  [...]
+//	},
+//	{
+//	  "ifindex": 4,
+//	  "ifname": "enp1s0f0np0",
+//	  "flags": [
+//	    "BROADCAST",
+//	    "MULTICAST",
+//	    "UP",
+//	    "LOWER_UP"
+//	  ],
+//	  "mtu": 3000,
+//	  [...]
+//	},
+//	{
+//	  "ifindex": 5,
+//	  "ifname": "enp1s0f1np1",
+//	  "flags": [
+//	    "BROADCAST",
+//	    "MULTICAST",
+//	    "UP",
+//	    "LOWER_UP"
+//	  ],
+//	  "mtu": 3000,
+//	  [...]
+//	}
+//
+// ]
+type ipLinkConf struct {
+	IFName string   `json:"ifname"`
+	Flags  []string `json:"flags"`
+}
+
+func ipNetworksToBPFFilter(prefixes []netip.Prefix) string {
+	b := strings.Builder{}
+
+	for i, prefix := range prefixes {
+		if i == 0 {
+			fmt.Fprintf(&b, "dst net %s", prefix)
+		} else {
+			fmt.Fprintf(&b, " or dst net %s", prefix)
+		}
+	}
+
+	return b.String()
+}
+
+func (agt *agent) setupSunetXDPd(lnc cdntypes.L4LBNodeConfig) error {
+	if len(lnc.IPNetworks) == 0 {
+		return fmt.Errorf("unable to setup sunet-xdpd filter with no IP service prefixes")
+	}
+	namespaceName := agt.l4lbConf.NetNS
+
+	// Learn what network interfaces are serving services
+	stdout, stderr, err := agentutils.RunCommand("ip", "-n", namespaceName, "-j", "link")
+	if err != nil {
+		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msgf("unable to call ip -n %s -j link", namespaceName)
+		return err
+	}
+
+	ipLinks := []ipLinkConf{}
+	err = json.Unmarshal([]byte(stdout), &ipLinks)
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to parse ip link json")
+		return err
+	}
+
+	serviceLinks := []ipLinkConf{}
+
+	// Filter out e.g. lo and dummy interfaces
+	for _, ipLink := range ipLinks {
+		keep := true
+		for _, flag := range ipLink.Flags {
+			if flag == "LOOPBACK" || flag == "NOARP" {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			serviceLinks = append(serviceLinks, ipLink)
+		}
+	}
+
+	xdpConf := sunetXDPdConfig{
+		Interfaces: map[string]xdpIfConfig{},
+	}
+
+	netBpf := ipNetworksToBPFFilter(lnc.IPNetworks)
+	if netBpf == "" {
+		return fmt.Errorf("netBpf string is empty")
+	}
+
+	for _, serviceLink := range serviceLinks {
+		xdpConf.Interfaces[serviceLink.IFName] = xdpIfConfig{BPFFilters: []bpfFilter{
+			{
+				Description: "Allow HTTP/HTTPS to service networks",
+				Expr:        fmt.Sprintf("tcp and (dst port 80 or dst port 443) and (%s)", netBpf),
+				Action:      "pass",
+			},
+		}}
+	}
+
+	b, err := json.MarshalIndent(xdpConf, "", "  ")
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to create JSON for sunet-xdpd config")
+		return err
+	}
+
+	xdpdConfFile := filepath.Join(agt.l4lbConf.SunetXDPdConfDir, "015-sunet-cdn-agent.json")
+	xdpdModified, err := agt.createOrUpdateFile(xdpdConfFile, 0, 0, 0o600, string(b))
+	if err != nil {
+		agt.logger.Err(err).Str("path", xdpdConfFile).Msg("unable to write out sunet-xdpd conf file")
+		return err
+	}
+
+	if xdpdModified {
+		args := []string{"systemctl", "restart", "sunet-xdpd.service"}
 		agt.logger.Info().Strs("cmd", args).Msg("running command")
 		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
 		if err != nil {
@@ -1714,6 +1913,11 @@ func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig, birdUID int, bi
 	}
 
 	err = agt.setupNetNS(lnc)
+	if err != nil {
+		return
+	}
+
+	err = agt.setupSunetXDPd(lnc)
 	if err != nil {
 		return
 	}
@@ -2478,10 +2682,11 @@ func (agt *agent) enableUnitFile(name string) (bool, error) {
 }
 
 type l4lbRuntimeConfig struct {
-	NetNS        string
-	NetNSConfDir string
-	LoopbackIPv4 netip.Addr
-	LoopbackIPv6 netip.Addr
+	NetNS            string
+	NetNSConfDir     string
+	SunetXDPdConfDir string
+	LoopbackIPv4     netip.Addr
+	LoopbackIPv6     netip.Addr
 }
 
 func parseL4LBConfig(l4lbConf l4lbNodeSettings) (l4lbRuntimeConfig, error) {
@@ -2501,10 +2706,11 @@ func parseL4LBConfig(l4lbConf l4lbNodeSettings) (l4lbRuntimeConfig, error) {
 	}
 
 	return l4lbRuntimeConfig{
-		NetNS:        l4lbConf.NetNS,
-		NetNSConfDir: l4lbConf.NetNSConfDir,
-		LoopbackIPv4: parsedIPv4,
-		LoopbackIPv6: parsedIPv6,
+		NetNS:            l4lbConf.NetNS,
+		NetNSConfDir:     l4lbConf.NetNSConfDir,
+		SunetXDPdConfDir: l4lbConf.SunetXDPdConfDir,
+		LoopbackIPv4:     parsedIPv4,
+		LoopbackIPv6:     parsedIPv6,
 	}, nil
 }
 

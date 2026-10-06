@@ -11,7 +11,7 @@ cert_dir = "/etc/letsencrypt/live"
 systemd_system_dir = "/etc/systemd/system"
 systemd_network_dir = "/etc/systemd/network"
 vinyl_image = "platform.sunet.se/sunet-cdn/cdn-vinyl@sha256:910c3ffed7d883e5fc9a4e6f53db05fda99e28534f8c0abfe9e289b99e69ff0f"
-haproxy_image = "docker.io/haproxytech/haproxy-debian:2.9.6"
+haproxy_image = "docker.io/haproxytech/haproxy-debian:3.4.4"
 
 [l4lb-node]
 netns = "l4lb"

@@ -52,6 +52,8 @@ services:
     dns:
       - 127.53.53.53
     restart: unless-stopped
+    mem_limit: 32g
+    memswap_limit: 32g
   vinyl:
     # We build our own vinyl with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so
@@ -93,6 +95,8 @@ services:
       "sunet-cdn.vcl",
       "-p",
       "feature=+http2",
+      "-p",
+      "transit_buffer=1M",
       "-s",
       "fellow=fellow,/cache/fellow-storage,512MB,512MB,10MB",
       "-p",
@@ -114,3 +118,5 @@ services:
       - no-new-privileges:true
     read_only: true
     restart: unless-stopped
+    mem_limit: 32g
+    memswap_limit: 32g

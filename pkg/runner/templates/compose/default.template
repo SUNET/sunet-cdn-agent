@@ -51,6 +51,7 @@ services:
     read_only: true
     dns:
       - 127.53.53.53
+    restart: unless-stopped
   vinyl:
     # We build our own vinyl with the slash vmod present. We use the slash
     # "fellow" storage backend to be able to persist cached content to disk, so
@@ -108,7 +109,8 @@ services:
     cap_drop: [ALL]
     security_opt:
       # Allow io_uring operations expected by slash fellow.
-      - seccomp:/var/lib/sunet-cdn-agent/cache-conf/seccomp/vinyl-slash-seccomp.json
+      - seccomp:{{.SeccompDir}}/vinyl-slash-seccomp.json
       # Same as haproxy hardening above
       - no-new-privileges:true
     read_only: true
+    restart: unless-stopped

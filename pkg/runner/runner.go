@@ -389,6 +389,7 @@ type cacheComposeConfig struct {
 	CertsDir        string
 	HAProxyStatsDir string
 	HAProxyLocalDir string
+	PurgerDir       string
 	CertsPrivateDir string
 	HAProxyUID      int64
 	VinylUID        int64
@@ -2318,6 +2319,20 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 				return
 			}
 
+			purgerPath := filepath.Join(volumesPath, "purger")
+			err = agt.createDirPathIfNeeded(purgerPath, int(vinylUID), 0, 0o700)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create purger dir")
+				return
+			}
+
+			purgerUnixSocketsPath := filepath.Join(purgerPath, "unix-sockets")
+			err = agt.createDirPathIfNeeded(purgerUnixSocketsPath, int(vinylUID), 0, 0o700)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create purger unix-sockets dir")
+				return
+			}
+
 			certsPrivatePath := filepath.Join(volumesPath, "certs-private")
 			err = agt.createDirPathIfNeeded(certsPrivatePath, int(haProxyUID), 0, 0o700)
 			if err != nil {
@@ -2461,6 +2476,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 				SharedDir:       sharedPath,
 				CertsDir:        certsPath,
 				HAProxyStatsDir: haproxyStatsPath,
+				PurgerDir:       purgerPath,
 				HAProxyLocalDir: haproxyLocalPath,
 				CertsPrivateDir: certsPrivatePath,
 				HAProxyUID:      haProxyUID,

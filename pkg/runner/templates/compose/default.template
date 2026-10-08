@@ -66,6 +66,7 @@ services:
       - {{.VersionBaseDir}}:/service-versions:ro
       - {{.SharedDir}}:/shared
       - {{.CacheDir}}:/cache
+      - {{.PurgerDir}}:/purger
     # From https://www.varnish-software.com/developers/tutorials/running-varnish-docker/:
     # ===
     # The /var/lib/varnish folder is frequently accessed by the varnishd
@@ -88,7 +89,9 @@ services:
       "-E",
       "/usr/lib/vinyl-cache/extension-vmods/libvmod_slash.so",
       "-a",
-      "/shared/unix-sockets/vinyl,PROXY,mode=660",
+      "ingress=/shared/unix-sockets/vinyl,PROXY,mode=660",
+      "-a",
+      "purger=/purger/unix-sockets/vinyl,PROXY,mode=600",
       "-p",
       "vcl_path=/service-versions/active/vinyl",
       "-f",

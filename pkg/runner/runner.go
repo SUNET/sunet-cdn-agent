@@ -1516,6 +1516,57 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 	return nil
 }
 
+func (agt *agent) setupL4LBNftables(lnc cdntypes.L4LBNodeConfig, nftablesConfDir string) error {
+	// Manage rules for receiving HTTP/HTTPS traffic for services
+	nftablesRules := []string{}
+
+	serviceNetworks4 := []netip.Prefix{}
+	serviceNetworks6 := []netip.Prefix{}
+
+	for _, network := range lnc.IPNetworks {
+		if network.Addr().Unmap().Is4() {
+			serviceNetworks4 = append(serviceNetworks4, network)
+		} else if network.Addr().Unmap().Is6() {
+			serviceNetworks6 = append(serviceNetworks6, network)
+		} else {
+			return fmt.Errorf("setupNftables: unknown address type for prefix: %s", network)
+		}
+	}
+
+	if len(serviceNetworks4) > 0 {
+		serviceNetworkSet4 := prefixNftablesSetString(serviceNetworks4)
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip daddr %s tcp dport { 80, 443 } ct state untracked counter accept comment \"sunet-cdn-agent-l4lb-HTTP(S)-ipv4\"", serviceNetworkSet4))
+	}
+
+	if len(serviceNetworks6) > 0 {
+		serviceNetworkSet6 := prefixNftablesSetString(serviceNetworks6)
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip6 daddr %s tcp dport { 80, 443 } ct state untracked counter accept comment \"sunet-cdn-agent-l4lb-HTTP(S)-ipv6\"", serviceNetworkSet6))
+	}
+
+	if len(nftablesRules) > 0 {
+		nftablesRulesFile := filepath.Join(nftablesConfDir, "850-sunet-cdn-agent-l4lb-rules.nft")
+
+		newNftablesRulesString := strings.Join(nftablesRules, "\n") + "\n"
+		modified, err := agt.createOrUpdateFile(nftablesRulesFile, 0, 0, 0o600, newNftablesRulesString)
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to write out nftables rules")
+			return err
+		}
+
+		if modified {
+			commandName := "systemctl"
+			args := strings.Fields("restart sunet-l4lb-namespace.service")
+			agt.logger.Info().Str("command", commandName).Strs("args", args).Msg("restarting sunet-l4lb-namespace.service")
+			stdout, stderr, err := agentutils.RunCommand(commandName, args...)
+			if err != nil {
+				return fmt.Errorf("setupL4LBNftables: unable to restart sunet-l4lb-namespace.service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string) error {
 	ipvsadmConfPath := filepath.Join(l4lbConfPath, "ipvsadm")
 	err := agt.createDirPathIfNeeded(ipvsadmConfPath, 0, 0, 0o700)
@@ -1906,8 +1957,14 @@ func (agt *agent) setBirdLink(lnPath string, activeTargetFile string, maintenanc
 }
 
 func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig, birdUID int, birdGID int) {
+	err := agt.setupL4LBNftables(lnc, "/opt/sunet-cdn/l4lb/conf/nftables.d")
+	if err != nil {
+		agt.logger.Err(err).Msg("unable to setup nftables rules for l4lb namespace")
+		return
+	}
+
 	l4lbConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "l4lb-conf")
-	err := agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o711)
+	err = agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o711)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create l4lb-conf dir")
 		return

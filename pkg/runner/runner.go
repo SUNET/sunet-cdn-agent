@@ -1232,11 +1232,11 @@ func ipNetworksToBPFFilter(prefixes []netip.Prefix) string {
 	b := strings.Builder{}
 
 	for i, prefix := range prefixes {
-		if i == 0 {
-			fmt.Fprintf(&b, "dst net %s", prefix)
-		} else {
-			fmt.Fprintf(&b, " or dst net %s", prefix)
+		if i > 0 {
+			b.WriteString(" or ")
 		}
+		b.WriteString("dst net ")
+		b.WriteString(prefix.String())
 	}
 
 	return b.String()
@@ -1329,11 +1329,10 @@ func nftablesSetString(addresses []netip.Addr) string {
 	b.WriteString("{ ")
 
 	for i, addr := range addresses {
-		if i == 0 {
-			b.WriteString(addr.String())
-		} else {
-			b.WriteString(", " + addr.String())
+		if i > 0 {
+			b.WriteString(", ")
 		}
+		b.WriteString(addr.String())
 	}
 
 	b.WriteString(" }")
@@ -1347,11 +1346,10 @@ func prefixNftablesSetString(prefixes []netip.Prefix) string {
 	b.WriteString("{ ")
 
 	for i, prefix := range prefixes {
-		if i == 0 {
-			b.WriteString(prefix.String())
-		} else {
-			b.WriteString(", " + prefix.String())
+		if i > 0 {
+			b.WriteString(", ")
 		}
+		b.WriteString(prefix.String())
 	}
 
 	b.WriteString(" }")

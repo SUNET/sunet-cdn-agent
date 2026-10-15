@@ -2132,6 +2132,24 @@ func getServiceIDPath(servicePath string, serviceID pgtype.UUID) string {
 	return filepath.Join(servicePath, serviceID.String())
 }
 
+func allowedHostsList(domainStrings []cdntypes.DomainString) string {
+	var b strings.Builder
+
+	for _, ds := range domainStrings {
+		// The haproxy acl uses the "host_only" converter which
+		// converts the header contents to lowercase, so the contents
+		// here must be lowercase as well to match. We use the
+		// golang.org/x/net/idna package to cleanup DNS names submitted
+		// to sunet-cdn-manager so we should not see non-lowercase
+		// domains at this point, but as we dont want to mess up the
+		// filter accidentally do ToLower just in case.
+		b.WriteString(strings.ToLower(ds.String()))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 	err := agt.setupNftables(cnc, "/etc/nftables/conf.d")
 	if err != nil {
@@ -2441,8 +2459,16 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					return
 				}
 
+				ahl := allowedHostsList(version.Domains)
+				haProxyAllowedHostsFile := filepath.Join(haproxyPath, "allowed-hosts.lst")
+				haProxyAllowedHostsChanged, err := agt.createOrUpdateFile(haProxyAllowedHostsFile, int(haProxyUID), 0, 0o600, ahl)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to build HAProxy allowed-hosts.lst file")
+					return
+				}
+
 				haProxyConfFile := filepath.Join(haproxyPath, "haproxy.cfg")
-				haProxyConfChanged, err := agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), int(commonGID), 0o600, version.HAProxyConfig)
+				haProxyConfChanged, err := agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), 0, 0o600, version.HAProxyConfig)
 				if err != nil {
 					agt.logger.Err(err).Msg("unable to build HAProxy conf file")
 					return
@@ -2479,6 +2505,9 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 							modifiedActiveLinks[org.ID.String()][service.ID.String()] = struct{}{}
 						}
 					}
+
+					// Treat haproxy config as changed if the main config or any related files have changed
+					haProxyConfChanged = haProxyConfChanged || haProxyAllowedHostsChanged
 
 					// If the active configuration has
 					// changed we need to reload configs

@@ -510,6 +510,12 @@ type agent struct {
 	templates  templates
 	conf       config
 	l4lbConf   l4lbRuntimeConfig
+
+	// pendingCertReloads holds the services (org ID -> service IDs) that
+	// had a cert pruned and whose HAProxy has not been reloaded since, see
+	// markCertRemoved. Only the cache node loop uses it, so it needs no
+	// lock.
+	pendingCertReloads map[string]map[string]struct{}
 }
 
 func sha256SumFile(fn string) (string, error) {
@@ -740,6 +746,15 @@ func (agt *agent) collectIPAddresses(orgs map[string]cdntypes.OrgWithServices, o
 	return allIPAddrs
 }
 
+// markServiceModified records that something for the service changed in
+// one of the orgIDs -> serviceIDs maps used by reloadContainerConfigs.
+func markServiceModified(m map[string]map[string]struct{}, orgID string, serviceID string) {
+	if _, ok := m[orgID]; !ok {
+		m[orgID] = map[string]struct{}{}
+	}
+	m[orgID][serviceID] = struct{}{}
+}
+
 func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}, org cdntypes.OrgWithServices, service cdntypes.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
 	for _, versionNumber := range orderedVersions {
 		version := service.ServiceVersions[versionNumber]
@@ -780,13 +795,7 @@ func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}
 				}
 
 				if modified {
-					if _, ok := modifiedCerts[org.ID.String()]; !ok {
-						modifiedCerts[org.ID.String()] = map[string]struct{}{
-							service.ID.String(): {},
-						}
-					} else {
-						modifiedCerts[org.ID.String()][service.ID.String()] = struct{}{}
-					}
+					markServiceModified(modifiedCerts, org.ID.String(), service.ID.String())
 				}
 			}
 		}
@@ -895,6 +904,10 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-haproxy-1
 	// sunet-cdn-agent_cache_7ea73f72-12e5-45b9-a687-57f678837b6b_061fa36c-ce3c-46f5-851d-ab765bf34229-vinyl-1
 	// ===
+	//
+	// If the containers can not be listed, returning early leaves
+	// agt.pendingCertReloads as it is, so the reload is tried again on the
+	// next pass.
 	stdout, stderr, err := agentutils.RunCommand("docker", "ps", "--format", "{{.Names}}")
 	if err != nil {
 		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Msg("docker ps failed")
@@ -908,6 +921,9 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	containerActiveChanged := map[string]struct{}{}
 	containerCertChanged := map[string]struct{}{}
 	containerActiveConfigChanged := map[string]struct{}{}
+	// For settling agt.pendingCertReloads once the reloads are done.
+	haproxyContainerService := map[string][2]string{}
+	runningHAProxy := map[string]map[string]struct{}{}
 	for containerNameScanner.Scan() {
 		containerName := containerNameScanner.Text()
 		if !strings.HasPrefix(containerName, containerPrefix) {
@@ -917,6 +933,11 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		// Pick out the org and service id strings from the container name
 		orgID := containerName[len(containerPrefix) : len(containerPrefix)+uuidLen]
 		serviceID := containerName[len(containerPrefix)+uuidLen+1 : len(containerPrefix)+uuidLen*2+1]
+
+		if strings.Contains(containerName, "-haproxy-") {
+			haproxyContainerService[containerName] = [2]string{orgID, serviceID}
+			markServiceModified(runningHAProxy, orgID, serviceID)
+		}
 
 		// Record containers for services who have had their active
 		// symlink updated, this affects all containers for that service
@@ -928,14 +949,13 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		}
 
 		// Record TLS handling containers for services that have had
-		// their cert modified
-		if _, ok := modifiedCerts[orgID]; ok {
-			if _, ok := modifiedCerts[orgID][serviceID]; ok {
-				if strings.Contains(containerName, "-haproxy-") {
-					agt.logger.Info().Str("container_name", containerName).Msg("cert changed, needs to reload")
-					containerCertChanged[containerName] = struct{}{}
-				}
-			}
+		// their cert modified in this pass, or a cert removed in this
+		// or an earlier pass without a successful reload since.
+		_, certModified := modifiedCerts[orgID][serviceID]
+		_, certRemoved := agt.pendingCertReloads[orgID][serviceID]
+		if (certModified || certRemoved) && strings.Contains(containerName, "-haproxy-") {
+			agt.logger.Info().Str("container_name", containerName).Msg("cert changed, needs to reload")
+			containerCertChanged[containerName] = struct{}{}
 		}
 
 		// Record containers for services who have had the active
@@ -984,6 +1004,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 
 	slices.Sort(sortedMergedContainers)
 
+	failedHAProxy := map[string]map[string]struct{}{}
 	for _, containerName := range sortedMergedContainers {
 		// Do the right thing based on what type of container needs a reload.
 		switch {
@@ -996,6 +1017,8 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		case strings.Contains(containerName, "-haproxy-"):
 			err := agt.reloadHAProxy(containerName)
 			if err != nil {
+				ids := haproxyContainerService[containerName]
+				markServiceModified(failedHAProxy, ids[0], ids[1])
 				continue
 			}
 			agt.logger.Info().Str("container_name", containerName).Msg("haproxy reloaded")
@@ -1003,6 +1026,8 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 			agt.logger.Info().Str("container_name", containerName).Msg("skipping unhandled container type")
 		}
 	}
+
+	clearSettledCertReloads(agt.pendingCertReloads, runningHAProxy, failedHAProxy)
 }
 
 type orgIPContainer struct {
@@ -2437,6 +2462,18 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 			// not present, making things fail to start.
 			err := agt.addCertsToService(modifiedCerts, org, service, orderedVersions, certsPrivatePath, haProxyUID)
 			if err != nil {
+				// The service is skipped, but a cert for
+				// e.g. a retired domain should not stay
+				// loaded for as long as the cert problem
+				// lasts. Prune only if the "active" link
+				// still points at a version that was sent.
+				removedCert, pruneErr := agt.pruneSkippedService(service, versionBasePath, certsPrivatePath)
+				if pruneErr != nil {
+					agt.logger.Err(pruneErr).Msg("unable to prune skipped service versions and certs")
+				}
+				if removedCert {
+					agt.markCertRemoved(org.ID.String(), service.ID.String())
+				}
 				continue serviceLoop
 			}
 
@@ -2497,13 +2534,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					serviceIsActive = true
 
 					if activeLinkModified {
-						if _, ok := modifiedActiveLinks[org.ID.String()]; !ok {
-							modifiedActiveLinks[org.ID.String()] = map[string]struct{}{
-								service.ID.String(): {},
-							}
-						} else {
-							modifiedActiveLinks[org.ID.String()][service.ID.String()] = struct{}{}
-						}
+						markServiceModified(modifiedActiveLinks, org.ID.String(), service.ID.String())
 					}
 
 					// Treat haproxy config as changed if the main config or any related files have changed
@@ -2530,6 +2561,24 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 						}
 					}
 
+				}
+			}
+
+			// Only prune when the service has an active version.
+			// Otherwise the "active" link could point at a
+			// version that was not sent, and we do not want to
+			// remove what a running service may still depend on.
+			if serviceIsActive {
+				removedCert, err := agt.pruneService(service, versionBasePath, certsPrivatePath)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to prune service versions and certs")
+				}
+
+				// Removing the cert file does not unload the
+				// cert from a running HAProxy, make sure it
+				// is reloaded.
+				if removedCert {
+					agt.markCertRemoved(org.ID.String(), service.ID.String())
 				}
 			}
 
@@ -2677,12 +2726,13 @@ mainLoop:
 
 func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls templates, conf config, l4lbRTConf l4lbRuntimeConfig) agent {
 	return agent{
-		ctx:        ctx,
-		httpClient: c,
-		logger:     logger,
-		templates:  tmpls,
-		conf:       conf,
-		l4lbConf:   l4lbRTConf,
+		ctx:                ctx,
+		httpClient:         c,
+		logger:             logger,
+		templates:          tmpls,
+		conf:               conf,
+		l4lbConf:           l4lbRTConf,
+		pendingCertReloads: map[string]map[string]struct{}{},
 	}
 }
 

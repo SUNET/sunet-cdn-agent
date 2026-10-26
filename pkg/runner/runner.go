@@ -756,6 +756,8 @@ func markServiceModified(m map[string]map[string]struct{}, orgID string, service
 }
 
 func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}, org cdntypes.OrgWithServices, service cdntypes.ServiceWithVersions, orderedVersions []int64, certsPrivatePath string, haProxyUID int64) error {
+	modifiedFiles := map[string]struct{}{}
+	activeFiles := []string{}
 	for _, versionNumber := range orderedVersions {
 		version := service.ServiceVersions[versionNumber]
 
@@ -795,9 +797,21 @@ func (agt *agent) addCertsToService(modifiedCerts map[string]map[string]struct{}
 				}
 
 				if modified {
-					markServiceModified(modifiedCerts, org.ID.String(), service.ID.String())
+					modifiedFiles[haproxyCombinedFile] = struct{}{}
+				}
+				if version.Active {
+					activeFiles = append(activeFiles, haproxyCombinedFile)
 				}
 			}
+		}
+	}
+
+	// We only need to reload because of a cert file
+	// change if the file is used by the active version
+	for _, activeFile := range activeFiles {
+		if _, found := modifiedFiles[activeFile]; found {
+			markServiceModified(modifiedCerts, org.ID.String(), service.ID.String())
+			break
 		}
 	}
 	return nil
@@ -954,7 +968,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		_, certModified := modifiedCerts[orgID][serviceID]
 		_, certRemoved := agt.pendingCertReloads[orgID][serviceID]
 		if (certModified || certRemoved) && strings.Contains(containerName, "-haproxy-") {
-			agt.logger.Info().Str("container_name", containerName).Msg("cert changed, needs to reload")
+			agt.logger.Info().Str("container_name", containerName).Msg("active cert changed, needs to reload")
 			containerCertChanged[containerName] = struct{}{}
 		}
 
@@ -2175,6 +2189,19 @@ func allowedHostsList(domainStrings []cdntypes.DomainString) string {
 	return b.String()
 }
 
+func certList(domainStrings []cdntypes.DomainString) string {
+	var b strings.Builder
+
+	for _, ds := range domainStrings {
+		b.WriteString("/certs-private/")
+		b.WriteString(strings.ToLower(ds.String()))
+		b.WriteString(".pem")
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 	err := agt.setupNftables(cnc, "/etc/nftables/conf.d")
 	if err != nil {
@@ -2504,6 +2531,14 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					return
 				}
 
+				cl := certList(version.Domains)
+				haProxyCertsListFile := filepath.Join(haproxyPath, "certs.lst")
+				haProxyCertsListChanged, err := agt.createOrUpdateFile(haProxyCertsListFile, int(haProxyUID), 0, 0o600, cl)
+				if err != nil {
+					agt.logger.Err(err).Msg("unable to build HAProxy certs.lst file")
+					return
+				}
+
 				haProxyConfFile := filepath.Join(haproxyPath, "haproxy.cfg")
 				haProxyConfChanged, err := agt.createOrUpdateFile(haProxyConfFile, int(haProxyUID), 0, 0o600, version.HAProxyConfig)
 				if err != nil {
@@ -2538,7 +2573,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 					}
 
 					// Treat haproxy config as changed if the main config or any related files have changed
-					haProxyConfChanged = haProxyConfChanged || haProxyAllowedHostsChanged
+					haProxyConfChanged = haProxyConfChanged || haProxyAllowedHostsChanged || haProxyCertsListChanged
 
 					// If the active configuration has
 					// changed we need to reload configs

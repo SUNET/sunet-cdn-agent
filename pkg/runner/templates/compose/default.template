@@ -4,7 +4,8 @@ services:
     image: "{{.HAProxyImage}}"
     volumes:
       - {{.VersionBaseDir}}:/service-versions:ro
-      - {{.SharedDir}}:/shared
+      - {{.HAProxyUnixSocketsDir}}:/haproxy-unix-sockets
+      - {{.VinylUnixSocketsDir}}:/vinyl-unix-sockets:ro
       - {{.CertsDir}}:/certs:ro
       - {{.CertsPrivateDir}}:/certs-private:ro
       - {{.HAProxyStatsDir}}:/haproxy-stats
@@ -64,7 +65,8 @@ services:
     user: {{.VinylUID}}:{{.GID}}
     volumes:
       - {{.VersionBaseDir}}:/service-versions:ro
-      - {{.SharedDir}}:/shared
+      - {{.VinylUnixSocketsDir}}:/vinyl-unix-sockets
+      - {{.HAProxyUnixSocketsDir}}:/haproxy-unix-sockets:ro
       - {{.CacheDir}}:/cache
       - {{.PurgerDir}}:/purger
     # From https://www.varnish-software.com/developers/tutorials/running-varnish-docker/:
@@ -89,7 +91,7 @@ services:
       "-E",
       "/usr/lib/vinyl-cache/extension-vmods/libvmod_slash.so",
       "-a",
-      "ingress=/shared/unix-sockets/vinyl,PROXY,mode=660",
+      "ingress=/vinyl-unix-sockets/vinyl,PROXY,mode=660",
       "-a",
       "purger=/purger/unix-sockets/vinyl,PROXY,mode=600",
       "-p",

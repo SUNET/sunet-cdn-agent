@@ -382,20 +382,21 @@ func (agt *agent) getCacheNodeConfig() (cdntypes.CacheNodeConfig, error) {
 }
 
 type cacheComposeConfig struct {
-	SeccompDir      string
-	VersionBaseDir  string
-	CacheDir        string
-	SharedDir       string
-	CertsDir        string
-	HAProxyStatsDir string
-	HAProxyLocalDir string
-	PurgerDir       string
-	CertsPrivateDir string
-	HAProxyUID      int64
-	VinylUID        int64
-	GID             int64
-	HAProxyImage    string
-	VinylImage      string
+	SeccompDir            string
+	VersionBaseDir        string
+	VinylUnixSocketsDir   string
+	HAProxyUnixSocketsDir string
+	CacheDir              string
+	CertsDir              string
+	HAProxyStatsDir       string
+	HAProxyLocalDir       string
+	PurgerDir             string
+	CertsPrivateDir       string
+	HAProxyUID            int64
+	VinylUID              int64
+	GID                   int64
+	HAProxyImage          string
+	VinylImage            string
 }
 
 type cacheSystemdServiceConfig struct {
@@ -2424,7 +2425,7 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 			}
 
 			sharedPath := filepath.Join(volumesPath, "shared")
-			err = agt.createDirPathIfNeeded(sharedPath, 0, int(commonGID), 0o770)
+			err = agt.createDirPathIfNeeded(sharedPath, 0, 0, 0o700)
 			if err != nil {
 				agt.logger.Err(err).Msg("unable to create shared volume dir")
 				return
@@ -2437,10 +2438,17 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 				return
 			}
 
-			unixSocketPath := filepath.Join(sharedPath, "unix-sockets")
-			err = agt.createDirPathIfNeeded(unixSocketPath, 0, int(commonGID), 0o770)
+			vinylUnixSocketsPath := filepath.Join(sharedPath, "vinyl-unix-sockets")
+			err = agt.createDirPathIfNeeded(vinylUnixSocketsPath, int(vinylUID), int(commonGID), 0o750)
 			if err != nil {
-				agt.logger.Err(err).Msg("unable to create shared unix-sockets dir")
+				agt.logger.Err(err).Msg("unable to create shared vinyl-unix-sockets dir")
+				return
+			}
+
+			haProxyUnixSocketsPath := filepath.Join(sharedPath, "haproxy-unix-sockets")
+			err = agt.createDirPathIfNeeded(haProxyUnixSocketsPath, int(haProxyUID), int(commonGID), 0o750)
+			if err != nil {
+				agt.logger.Err(err).Msg("unable to create shared haproxy-unix-sockets dir")
 				return
 			}
 
@@ -2638,20 +2646,21 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 			}
 
 			ccc := cacheComposeConfig{
-				SeccompDir:      seccompDir,
-				VersionBaseDir:  versionBasePath,
-				CacheDir:        cachePath,
-				SharedDir:       sharedPath,
-				CertsDir:        certsPath,
-				HAProxyStatsDir: haproxyStatsPath,
-				PurgerDir:       purgerPath,
-				HAProxyLocalDir: haproxyLocalPath,
-				CertsPrivateDir: certsPrivatePath,
-				HAProxyUID:      haProxyUID,
-				VinylUID:        vinylUID,
-				GID:             commonGID,
-				HAProxyImage:    agt.conf.ConfWriter.HAProxyImage,
-				VinylImage:      agt.conf.ConfWriter.VinylImage,
+				SeccompDir:            seccompDir,
+				VersionBaseDir:        versionBasePath,
+				VinylUnixSocketsDir:   vinylUnixSocketsPath,
+				HAProxyUnixSocketsDir: haProxyUnixSocketsPath,
+				CacheDir:              cachePath,
+				CertsDir:              certsPath,
+				HAProxyStatsDir:       haproxyStatsPath,
+				PurgerDir:             purgerPath,
+				HAProxyLocalDir:       haproxyLocalPath,
+				CertsPrivateDir:       certsPrivatePath,
+				HAProxyUID:            haProxyUID,
+				VinylUID:              vinylUID,
+				GID:                   commonGID,
+				HAProxyImage:          agt.conf.ConfWriter.HAProxyImage,
+				VinylImage:            agt.conf.ConfWriter.VinylImage,
 			}
 
 			cacheCompose, err := generateCacheCompose(agt.templates.cacheCompose, ccc)

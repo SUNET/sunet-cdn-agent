@@ -17,5 +17,12 @@ haproxy_image = "docker.io/haproxytech/haproxy-debian:3.4.4"
 netns = "l4lb"
 netns_conf_dir = "/opt/sunet-cdn/l4lb/conf"
 sunet_xdpd_conf_dir = "/etc/sunet-xdpd/conf.d"
-loopback_ipv4 = 198.51.100.10/32
-loopback_ipv6 = 2001:db8::10/128
+loopback_ipv4 = "198.51.100.10"
+loopback_ipv6 = "2001:db8::10"
+
+#[health-check]
+#mode = "off" # "off", "observe" or "enforce", only used on l4lb nodes
+#port = 8088
+
+#[metrics]
+#listen_address = "" # e.g. "127.0.0.1:9811", empty disables /metrics

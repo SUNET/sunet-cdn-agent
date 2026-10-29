@@ -14,6 +14,13 @@ import (
 // version set at build time with -ldflags="-X main.version=v0.0.1"
 var version = "undefined"
 
+// Keep the main goroutine on the main thread so no health check dial can run
+// on it and leave it parked in the l4lb network namespace, see
+// pkg/healthcheck/netns.go. Only locking in init is guaranteed to do this.
+func init() {
+	runtime.LockOSThread()
+}
+
 func main() {
 	defaultHostname := "sunet-cdn-agent-hostname-unknown"
 	hostname, err := os.Hostname()

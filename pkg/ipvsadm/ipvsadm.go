@@ -2,11 +2,13 @@ package ipvsadm
 
 import (
 	"bufio"
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -594,6 +596,27 @@ type IPVSUpdates struct {
 	rsToEdit   []realServerIdentifier
 }
 
+// orderRealServerEdits returns the real-server edits with the largest weight
+// increase first and the largest decrease last, so that putting one
+// real-server back and taking another out in the same update never leaves a
+// virtual service without a real-server in rotation in between.
+func orderRealServerEdits(loadedRuleSet RuleSet, newRuleSet RuleSet, edits []realServerIdentifier) []realServerIdentifier {
+	// change is each real-server's new weight minus its loaded weight.
+	change := make(map[realServerIdentifier]int, len(newRuleSet.realServers))
+	for _, rs := range newRuleSet.realServers {
+		change[rs.realServerIdentifier] += rs.weight
+	}
+	for _, rs := range loadedRuleSet.realServers {
+		change[rs.realServerIdentifier] -= rs.weight
+	}
+
+	ordered := slices.Clone(edits)
+	slices.SortStableFunc(ordered, func(a, b realServerIdentifier) int {
+		return cmp.Compare(change[b], change[a])
+	})
+	return ordered
+}
+
 func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, newRuleSet RuleSet, updates IPVSUpdates) error {
 	// If netns is empty we call ipvsadm directly, otherwise we wrap it in "ip netns exec <netns>"
 	var commandName string
@@ -686,7 +709,7 @@ func UpdateRules(logger zerolog.Logger, netns string, loadedRuleSet RuleSet, new
 	}
 
 	// Edit real servers
-	for _, rsIdent := range updates.rsToEdit {
+	for _, rsIdent := range orderRealServerEdits(loadedRuleSet, newRuleSet, updates.rsToEdit) {
 		for _, newRS := range newRuleSet.realServers {
 			if newRS.realServerIdentifier == rsIdent {
 				ipvsadmArgs := strings.Fields(newRS.editString())

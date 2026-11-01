@@ -28,10 +28,14 @@ import (
 	"time"
 
 	"github.com/SUNET/sunet-cdn-agent/pkg/agentutils"
+	"github.com/SUNET/sunet-cdn-agent/pkg/healthcheck"
 	"github.com/SUNET/sunet-cdn-agent/pkg/ipvsadm"
 	"github.com/SUNET/sunet-cdn-manager/pkg/cdntypes"
 	"github.com/go-playground/validator/v10"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 )
@@ -48,8 +52,20 @@ const (
 )
 
 type config struct {
-	Manager    managerSettings
-	ConfWriter confWriterSettings
+	Manager     managerSettings
+	ConfWriter  confWriterSettings
+	HealthCheck healthCheckSettings `mapstructure:"health-check"`
+	Metrics     metricsSettings
+}
+
+type healthCheckSettings struct {
+	// Mode is only used on l4lb nodes, port by both l4lb and cache nodes.
+	Mode string `mapstructure:"mode"`
+	Port uint16 `mapstructure:"port"`
+}
+
+type metricsSettings struct {
+	ListenAddress string `mapstructure:"listen_address"`
 }
 
 type managerSettings struct {
@@ -512,11 +528,42 @@ type agent struct {
 	conf       config
 	l4lbConf   l4lbRuntimeConfig
 
+	// healthChecker is nil unless l4lb health checking is enabled.
+	healthChecker *healthcheck.Checker
+
 	// pendingCertReloads holds the services (org ID -> service IDs) that
 	// had a cert pruned and whose HAProxy has not been reloaded since, see
 	// markCertRemoved. Only the cache node loop uses it, so it needs no
 	// lock.
 	pendingCertReloads map[string]map[string]struct{}
+
+	// pendingL4LBRestarts holds the systemd services on the l4lb node whose
+	// configuration changed since their last successful restart, see
+	// restartL4LBService. Only the l4lb node loop uses it, so it needs no
+	// lock.
+	pendingL4LBRestarts map[string]struct{}
+}
+
+// restartL4LBService restarts the systemd service name if it is in
+// pendingL4LBRestarts. A change is added there as soon as its file is
+// written, since the file is unchanged on the next pass: a restart that
+// failed, or never happened because a later step failed, is then still
+// retried.
+func (agt *agent) restartL4LBService(name string) error {
+	if _, pending := agt.pendingL4LBRestarts[name]; !pending {
+		return nil
+	}
+
+	args := []string{"systemctl", "restart", name}
+	agt.logger.Info().Strs("cmd", args).Msg("running command")
+	stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
+	if err != nil {
+		agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
+		return fmt.Errorf("failed to run %q: %w", strings.Join(args, " "), err)
+	}
+	delete(agt.pendingL4LBRestarts, name)
+
+	return nil
 }
 
 func sha256SumFile(fn string) (string, error) {
@@ -1155,6 +1202,8 @@ type interfaceConfig struct {
 	IPv6         []string `json:"ipv6"`
 }
 
+// setupNetNS writes the sunet-l4lb-namespace config for the l4lb network
+// namespace. The service is restarted by generateL4LBFiles.
 func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 	namespaceName := agt.l4lbConf.NetNS
 	interfaceName := "dummy0"
@@ -1200,15 +1249,8 @@ func (agt *agent) setupNetNS(lnc cdntypes.L4LBNodeConfig) error {
 		agt.logger.Err(err).Str("path", netnsConfFile).Msg("unable to write out netns conf file")
 		return err
 	}
-
 	if netNSModified {
-		args := []string{"systemctl", "restart", "sunet-l4lb-namespace.service"}
-		agt.logger.Info().Strs("cmd", args).Msg("running command")
-		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
-		if err != nil {
-			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
-			return fmt.Errorf("failed to run %q: %w", strings.Join(args, " "), err)
-		}
+		agt.pendingL4LBRestarts["sunet-l4lb-namespace.service"] = struct{}{}
 	}
 
 	return nil
@@ -1282,6 +1324,51 @@ func ipNetworksToBPFFilter(prefixes []netip.Prefix) string {
 	return b.String()
 }
 
+// healthReplyRules returns the sunet-xdpd filters and nftables rules that
+// let health check replies from the cache nodes back in to the l4lb source
+// addresses. Because of DSR nothing else ever comes back from the cache nodes.
+func (agt *agent) healthReplyRules(lnc cdntypes.L4LBNodeConfig) ([]bpfFilter, []string) {
+	if agt.conf.HealthCheck.Mode == string(healthcheck.ModeOff) {
+		return nil, nil
+	}
+
+	port := agt.conf.HealthCheck.Port
+	var filters []bpfFilter
+	var rules []string
+
+	for _, family := range []struct {
+		name, nftFamily string
+		is              func(netip.Addr) bool
+		src             netip.Addr
+	}{
+		{"ipv4", "ip", netip.Addr.Is4, agt.l4lbConf.LoopbackIPv4},
+		{"ipv6", "ip6", netip.Addr.Is6, agt.l4lbConf.LoopbackIPv6},
+	} {
+		var addrs []netip.Addr
+		var hosts []string
+		for _, cacheNode := range lnc.CacheNodes {
+			for _, addr := range cacheNode.Addresses {
+				if addr = addr.Unmap(); family.is(addr) {
+					addrs = append(addrs, addr)
+					hosts = append(hosts, "src host "+addr.String())
+				}
+			}
+		}
+		if len(addrs) == 0 {
+			continue
+		}
+
+		filters = append(filters, bpfFilter{
+			Description: "Allow health check replies from cache nodes (" + family.name + ")",
+			Expr:        fmt.Sprintf("tcp and src port %d and (%s) and dst host %s", port, strings.Join(hosts, " or "), family.src),
+			Action:      "pass",
+		})
+		rules = append(rules, fmt.Sprintf("add rule inet filter input %[1]s saddr %[2]s %[1]s daddr %[3]s tcp sport %[4]d ct state established counter accept comment \"sunet-cdn-agent-l4lb-health-reply-%[5]s\"", family.nftFamily, nftablesSetString(addrs), family.src, port, family.name))
+	}
+
+	return filters, rules
+}
+
 func (agt *agent) setupSunetXDPd(lnc cdntypes.L4LBNodeConfig) error {
 	if len(lnc.IPNetworks) == 0 {
 		return fmt.Errorf("unable to setup sunet-xdpd filter with no IP service prefixes")
@@ -1327,14 +1414,16 @@ func (agt *agent) setupSunetXDPd(lnc cdntypes.L4LBNodeConfig) error {
 		return fmt.Errorf("netBpf string is empty")
 	}
 
+	healthFilters, _ := agt.healthReplyRules(lnc)
+
 	for _, serviceLink := range serviceLinks {
-		xdpConf.Interfaces[serviceLink.IFName] = xdpIfConfig{BPFFilters: []bpfFilter{
+		xdpConf.Interfaces[serviceLink.IFName] = xdpIfConfig{BPFFilters: append([]bpfFilter{
 			{
 				Description: "Allow HTTP/HTTPS to service networks",
 				Expr:        fmt.Sprintf("tcp and (dst port 80 or dst port 443) and (%s)", netBpf),
 				Action:      "pass",
 			},
-		}}
+		}, healthFilters...)}
 	}
 
 	b, err := json.MarshalIndent(xdpConf, "", "  ")
@@ -1349,18 +1438,11 @@ func (agt *agent) setupSunetXDPd(lnc cdntypes.L4LBNodeConfig) error {
 		agt.logger.Err(err).Str("path", xdpdConfFile).Msg("unable to write out sunet-xdpd conf file")
 		return err
 	}
-
 	if xdpdModified {
-		args := []string{"systemctl", "restart", "sunet-xdpd.service"}
-		agt.logger.Info().Strs("cmd", args).Msg("running command")
-		stdout, stderr, err := agentutils.RunCommand(args[0], args[1:]...)
-		if err != nil {
-			agt.logger.Err(err).Str("stdout", stdout).Str("stderr", stderr).Strs("cmd", args).Msg("command failed")
-			return fmt.Errorf("failed to run %q: %w", strings.Join(args, " "), err)
-		}
+		agt.pendingL4LBRestarts["sunet-xdpd.service"] = struct{}{}
 	}
 
-	return nil
+	return agt.restartL4LBService("sunet-xdpd.service")
 }
 
 func nftablesSetString(addresses []netip.Addr) string {
@@ -1507,6 +1589,15 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 
 	}
 
+	// Let the l4lb nodes reach the health check service.
+	if len(tunnelSources4) > 0 {
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip saddr %s tcp dport %d counter accept comment \"sunet-cdn-agent-health4\"", nftablesSetString(tunnelSources4), agt.conf.HealthCheck.Port))
+	}
+
+	if len(tunnelSources6) > 0 {
+		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip6 saddr %s tcp dport %d counter accept comment \"sunet-cdn-agent-health6\"", nftablesSetString(tunnelSources6), agt.conf.HealthCheck.Port))
+	}
+
 	serviceNetworks4 := []netip.Prefix{}
 	serviceNetworks6 := []netip.Prefix{}
 
@@ -1554,6 +1645,8 @@ func (agt *agent) setupNftables(cnc cdntypes.CacheNodeConfig, nftablesConfDir st
 	return nil
 }
 
+// setupL4LBNftables writes the sunet-l4lb-namespace nftables rules. The
+// service is restarted by generateL4LBFiles.
 func (agt *agent) setupL4LBNftables(lnc cdntypes.L4LBNodeConfig, nftablesConfDir string) error {
 	// Manage rules for receiving HTTP/HTTPS traffic for services
 	nftablesRules := []string{}
@@ -1581,6 +1674,9 @@ func (agt *agent) setupL4LBNftables(lnc cdntypes.L4LBNodeConfig, nftablesConfDir
 		nftablesRules = append(nftablesRules, fmt.Sprintf("add rule inet filter input ip6 daddr %s tcp dport { 80, 443 } ct state untracked counter accept comment \"sunet-cdn-agent-l4lb-HTTP(S)-ipv6\"", serviceNetworkSet6))
 	}
 
+	_, healthRules := agt.healthReplyRules(lnc)
+	nftablesRules = append(nftablesRules, healthRules...)
+
 	if len(nftablesRules) > 0 {
 		nftablesRulesFile := filepath.Join(nftablesConfDir, "850-sunet-cdn-agent-l4lb-rules.nft")
 
@@ -1590,19 +1686,42 @@ func (agt *agent) setupL4LBNftables(lnc cdntypes.L4LBNodeConfig, nftablesConfDir
 			agt.logger.Err(err).Msg("unable to write out nftables rules")
 			return err
 		}
-
 		if modified {
-			commandName := "systemctl"
-			args := strings.Fields("restart sunet-l4lb-namespace.service")
-			agt.logger.Info().Str("command", commandName).Strs("args", args).Msg("restarting sunet-l4lb-namespace.service")
-			stdout, stderr, err := agentutils.RunCommand(commandName, args...)
-			if err != nil {
-				return fmt.Errorf("setupL4LBNftables: unable to restart sunet-l4lb-namespace.service, stdout: '%s', stderr: '%s': %w", stdout, stderr, err)
-			}
+			agt.pendingL4LBRestarts["sunet-l4lb-namespace.service"] = struct{}{}
 		}
 	}
 
 	return nil
+}
+
+// withNewMaintenance returns a copy of last where the cache nodes that next
+// puts in maintenance are in maintenance as well. Nodes are never taken out
+// of maintenance this way.
+func withNewMaintenance(last cdntypes.L4LBNodeConfig, next cdntypes.L4LBNodeConfig) cdntypes.L4LBNodeConfig {
+	inMaintenance := map[pgtype.UUID]bool{}
+	for _, cacheNode := range next.CacheNodes {
+		if cacheNode.Maintenance {
+			inMaintenance[cacheNode.ID] = true
+		}
+	}
+
+	merged := last
+	merged.CacheNodes = slices.Clone(last.CacheNodes)
+	for i := range merged.CacheNodes {
+		if inMaintenance[merged.CacheNodes[i].ID] {
+			merged.CacheNodes[i].Maintenance = true
+		}
+	}
+	return merged
+}
+
+// realServerWeight returns 0 (no new connections) for a cache node address
+// that is in maintenance or taken out by health checking, otherwise 1.
+func realServerWeight(cacheNode cdntypes.CacheNode, addr netip.Addr, health healthcheck.Snapshot) int {
+	if cacheNode.Maintenance || health.Down(cacheNode.ID.String(), addr) {
+		return 0
+	}
+	return 1
 }
 
 func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string) error {
@@ -1622,6 +1741,11 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 	// -a -t [<service-ipv6>]:80 -r [<cache-node-ipv6>]:80 -i -w 1 --tun-type ipip
 	// -A -t [<service-ipv6>]:443 -s mh -b mh-fallback,mh-port
 	// -a -t [<service-ipv6]:443 -r [<cache-node-ipv6>]:443 -i -w 1 --tun-type ipip
+
+	health := healthcheck.Snapshot{}
+	if agt.healthChecker != nil {
+		health = agt.healthChecker.Snapshot()
+	}
 
 	// Store rules in a slice to track ordering
 	// newIPVSRules := []string{}
@@ -1644,15 +1768,10 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 				}
 
 				for _, cacheNode := range lnc.CacheNodes {
-					weight := 1
-					if cacheNode.Maintenance {
-						weight = 0
-					}
-
 					if unmapServiceAddr.Is4() {
 						for _, cacheNodeAddress := range cacheNode.Addresses {
 							if cacheNodeAddress.Unmap().Is4() {
-								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, realServerWeight(cacheNode, cacheNodeAddress.Unmap(), health), "ipip")
 								if err != nil {
 									return fmt.Errorf("unable to init HTTP IPv4 cachenode real-server: %w", err)
 								}
@@ -1667,7 +1786,7 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 					if serviceAddr.Unmap().Is6() {
 						for _, cacheNodeAddress := range cacheNode.Addresses {
 							if cacheNodeAddress.Unmap().Is6() {
-								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, realServerWeight(cacheNode, cacheNodeAddress.Unmap(), health), "ipip")
 								if err != nil {
 									return fmt.Errorf("unable to init HTTP IPv6 cachenode real-server: %w", err)
 								}
@@ -1695,14 +1814,10 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 				}
 
 				for _, cacheNode := range lnc.CacheNodes {
-					weight := 1
-					if cacheNode.Maintenance {
-						weight = 0
-					}
 					if unmapServiceAddr.Is4() {
 						for _, cacheNodeAddress := range cacheNode.Addresses {
 							if cacheNodeAddress.Unmap().Is4() {
-								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, realServerWeight(cacheNode, cacheNodeAddress.Unmap(), health), "ipip")
 								if err != nil {
 									return fmt.Errorf("unable to init HTTPS IPv4 cachenode real-server: %w", err)
 								}
@@ -1717,7 +1832,7 @@ func (agt *agent) setupIpvsadm(lnc cdntypes.L4LBNodeConfig, l4lbConfPath string)
 					if unmapServiceAddr.Is6() {
 						for _, cacheNodeAddress := range cacheNode.Addresses {
 							if cacheNodeAddress.Unmap().Is6() {
-								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, weight, "ipip")
+								rs, err := ipvsadm.NewRealServer("tcp", unmapServiceAddr, port, cacheNodeAddress.Unmap(), port, realServerWeight(cacheNode, cacheNodeAddress.Unmap(), health), "ipip")
 								if err != nil {
 									return fmt.Errorf("unable to init HTTPS IPv6 cachenode real-server: %w", err)
 								}
@@ -1994,39 +2109,56 @@ func (agt *agent) setBirdLink(lnPath string, activeTargetFile string, maintenanc
 	return modified, nil
 }
 
-func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig, birdUID int, birdGID int) {
+// generateL4LBFiles applies lnc to the l4lb node. It returns whether
+// everything the ipvs rules depend on (nftables, network namespace and
+// sunet-xdpd) was set up, which is when lnc may also be used to reapply the
+// ipvs rules on its own.
+func (agt *agent) generateL4LBFiles(lnc cdntypes.L4LBNodeConfig, birdUID int, birdGID int) bool {
 	err := agt.setupL4LBNftables(lnc, "/opt/sunet-cdn/l4lb/conf/nftables.d")
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to setup nftables rules for l4lb namespace")
-		return
+		return false
 	}
 
 	l4lbConfPath := filepath.Join(agt.conf.ConfWriter.RootDir, "l4lb-conf")
 	err = agt.createDirPathIfNeeded(l4lbConfPath, 0, 0, 0o711)
 	if err != nil {
 		agt.logger.Err(err).Msg("unable to create l4lb-conf dir")
-		return
+		return false
 	}
 
 	err = agt.setupNetNS(lnc)
 	if err != nil {
-		return
+		return false
+	}
+
+	// Both files are loaded by sunet-l4lb-namespace, so restart it once
+	// after both are written. Then a fixed version of either file is always
+	// written before a failed restart is retried.
+	err = agt.restartL4LBService("sunet-l4lb-namespace.service")
+	if err != nil {
+		return false
 	}
 
 	err = agt.setupSunetXDPd(lnc)
 	if err != nil {
-		return
+		return false
 	}
 
+	// From here on lnc is usable for reapplying the ipvs rules, even if one
+	// of the remaining steps fails.
 	err = agt.setupIpvsadm(lnc, l4lbConfPath)
 	if err != nil {
-		return
+		agt.logger.Err(err).Msg("unable to set up ipvs rules")
+		return true
 	}
 
 	err = agt.setupBird(lnc, l4lbConfPath, birdUID, birdGID)
 	if err != nil {
-		return
+		agt.logger.Err(err).Msg("unable to set up BIRD")
 	}
+
+	return true
 }
 
 func (agt *agent) getExistingOrgsAndServices(orgPath string) (map[pgtype.UUID]map[pgtype.UUID]struct{}, error) {
@@ -2731,21 +2863,110 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup, birdUID int, birdGID int) {
 	defer wg.Done()
 
-mainLoop:
-	for {
+	var lastConfig *cdntypes.L4LBNodeConfig
+
+	// applyHealth reapplies the ipvs rules from the last config that was set
+	// up, with the current health state.
+	applyHealth := func() {
+		if agt.healthChecker == nil || lastConfig == nil {
+			return
+		}
+		err := agt.setupIpvsadm(*lastConfig, filepath.Join(agt.conf.ConfWriter.RootDir, "l4lb-conf"))
+		if err != nil {
+			agt.logger.Err(err).Msg("unable to apply health check state to ipvs")
+		}
+	}
+
+	fetch := func() {
 		lnc, err := agt.getL4LBNodeConfig()
 		if err != nil {
 			agt.logger.Err(err).Msg("unable to fetch l4lb node config")
-		} else {
-			agt.generateL4LBFiles(lnc, birdUID, birdGID)
+			// Keep the ipvs rules in line with the health state while the
+			// manager is unreachable, which also retries a failed update.
+			applyHealth()
+			return
 		}
-		// Wait for the next time to run the loop, or exit if we are shutting down
-		select {
-		case <-time.After(time.Second * 10):
-		case <-agt.ctx.Done():
-			break mainLoop
+		// Only use a config for health checking once the rules it depends
+		// on are in place, otherwise keep the previous one. Nodes the new
+		// config puts in maintenance are honoured right away, so that
+		// rounds probing while the config is applied can't count them as
+		// healthy peers, and a health recovery can't put them back in
+		// rotation if it fails.
+		if lastConfig != nil {
+			merged := withNewMaintenance(*lastConfig, lnc)
+			lastConfig = &merged
+			if agt.healthChecker != nil {
+				agt.healthChecker.SetConfig(merged)
+			}
+		}
+		if !agt.generateL4LBFiles(lnc, birdUID, birdGID) {
+			applyHealth()
+			return
+		}
+		lastConfig = &lnc
+		if agt.healthChecker != nil {
+			agt.healthChecker.SetConfig(lnc)
 		}
 	}
+
+	var healthChanged <-chan struct{}
+	if agt.healthChecker != nil {
+		healthChanged = agt.healthChecker.Changed()
+	}
+
+	// A ticker keeps the config fetches on schedule no matter how often
+	// health checking wakes us up to reapply the ipvs rules.
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	fetch()
+	for {
+		select {
+		case <-ticker.C:
+			fetch()
+		case <-healthChanged:
+			applyHealth()
+		case <-agt.ctx.Done():
+			return
+		}
+	}
+}
+
+// serveMetrics serves the metrics in reg on /metrics at addr until ctx is
+// done.
+func serveMetrics(ctx context.Context, logger zerolog.Logger, addr string, reg *prometheus.Registry) error {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		// Longer than a typical scrape interval so the scraper can reuse
+		// its connection.
+		IdleTimeout: 90 * time.Second,
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Err(err).Msg("unable to shut down metrics server")
+		}
+	}()
+
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// ListenAndServe returns as soon as Shutdown closes the listener,
+		// wait for active scrapes to drain as well.
+		<-shutdownDone
+		return nil
+	}
+	return err
 }
 
 func (agt *agent) cacheNodeLoop(wg *sync.WaitGroup) {
@@ -2770,13 +2991,14 @@ mainLoop:
 
 func newAgent(ctx context.Context, logger zerolog.Logger, c *http.Client, tmpls templates, conf config, l4lbRTConf l4lbRuntimeConfig) agent {
 	return agent{
-		ctx:                ctx,
-		httpClient:         c,
-		logger:             logger,
-		templates:          tmpls,
-		conf:               conf,
-		l4lbConf:           l4lbRTConf,
-		pendingCertReloads: map[string]map[string]struct{}{},
+		ctx:                 ctx,
+		httpClient:          c,
+		logger:              logger,
+		templates:           tmpls,
+		conf:                conf,
+		l4lbConf:            l4lbRTConf,
+		pendingCertReloads:  map[string]map[string]struct{}{},
+		pendingL4LBRestarts: map[string]struct{}{},
 	}
 }
 
@@ -2924,6 +3146,9 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 	}(logger, cancel)
 
 	var conf config
+	viper.SetDefault("health-check.mode", string(healthcheck.ModeOff))
+	viper.SetDefault("health-check.port", healthcheck.DefaultPort)
+
 	err := viper.Unmarshal(&conf)
 	if err != nil {
 		return fmt.Errorf("viper unable to decode main conf into struct: %w", err)
@@ -2932,6 +3157,14 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 	err = validate.Struct(conf)
 	if err != nil {
 		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	healthCheckMode, err := healthcheck.ParseMode(conf.HealthCheck.Mode)
+	if err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+	if conf.HealthCheck.Port == 0 {
+		return errors.New("invalid config: health-check port must be greater than 0")
 	}
 
 	// Do a second pass over the config file if we are an l4lb node, this
@@ -3053,6 +3286,34 @@ func Run(logger zerolog.Logger, cacheNode bool, l4lbNode bool) error {
 	}
 
 	var wg sync.WaitGroup
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	if conf.Metrics.ListenAddress != "" {
+		wg.Go(func() {
+			err := serveMetrics(ctx, logger, conf.Metrics.ListenAddress, reg)
+			if err != nil {
+				logger.Err(err).Msg("metrics server failed")
+			}
+		})
+	}
+
+	if l4lbNode && healthCheckMode != healthcheck.ModeOff {
+		logger.Info().Str("mode", string(healthCheckMode)).Msg("starting l4lb health checking")
+		// Set before the l4lb loop starts so it sees the checker.
+		agt.healthChecker = healthcheck.NewChecker(healthcheck.Config{
+			Mode:       healthCheckMode,
+			Port:       conf.HealthCheck.Port,
+			NetNS:      l4lbRTConf.NetNS,
+			SourceIPv4: l4lbRTConf.LoopbackIPv4,
+			SourceIPv6: l4lbRTConf.LoopbackIPv6,
+		}, reg, logger)
+		wg.Go(func() {
+			agt.healthChecker.Run(ctx)
+		})
+	}
 
 	if cacheNode {
 		wg.Add(1)

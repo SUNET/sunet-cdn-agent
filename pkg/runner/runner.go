@@ -2877,6 +2877,8 @@ func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup, birdUID int, birdGID int) {
 		}
 	}
 
+	restored := false
+
 	fetch := func() {
 		lnc, err := agt.getL4LBNodeConfig()
 		if err != nil {
@@ -2885,6 +2887,21 @@ func (agt *agent) l4lbNodeLoop(wg *sync.WaitGroup, birdUID int, birdGID int) {
 			// manager is unreachable, which also retries a failed update.
 			applyHealth()
 			return
+		}
+		// Before the rules are applied for the first time, pick up the
+		// cache nodes a previous run took out of rotation, so restarting
+		// the agent doesn't put them back.
+		if !restored {
+			restored = true
+			if agt.healthChecker != nil {
+				agt.healthChecker.RestoreDown(lnc, func() (map[netip.Addr]struct{}, error) {
+					loaded, err := ipvsadm.GetLoadedRules(agt.logger, agt.l4lbConf.NetNS)
+					if err != nil {
+						return nil, err
+					}
+					return loaded.ZeroWeightServers(), nil
+				})
+			}
 		}
 		// Only use a config for health checking once the rules it depends
 		// on are in place, otherwise keep the previous one. Nodes the new

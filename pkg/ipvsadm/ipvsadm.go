@@ -497,6 +497,18 @@ func (rset *RuleSet) AddRS(rs RealServer) error {
 	return nil
 }
 
+// ZeroWeightServers returns the addresses of the real-servers that have
+// weight 0 in at least one virtual-service.
+func (rset RuleSet) ZeroWeightServers() map[netip.Addr]struct{} {
+	zero := map[netip.Addr]struct{}{}
+	for _, rs := range rset.realServers {
+		if rs.weight == 0 {
+			zero[rs.address] = struct{}{}
+		}
+	}
+	return zero
+}
+
 func GetLoadedRules(logger zerolog.Logger, netns string) (RuleSet, error) {
 	// If netns is empty we call ipvsadm directly, otherwise we wrap it in "ip netns exec <netns>"
 	var commandName string

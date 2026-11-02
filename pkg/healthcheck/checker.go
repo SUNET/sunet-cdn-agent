@@ -2,6 +2,7 @@ package healthcheck
 
 import (
 	"context"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -103,6 +104,36 @@ func (c *Checker) SetConfig(lnc cdntypes.L4LBNodeConfig) {
 	})
 }
 
+// RestoreDown marks the addresses of lnc that health checking would probe and
+// that zeroWeight reports at weight 0 in ipvs as down. Called before the
+// rules for lnc are first applied, it keeps the addresses a previous run took
+// out of rotation out across a restart. They are put back once they pass
+// upAfter rounds, like any other down address. Outside of enforce mode the
+// ipvs weights don't come from health checking, so nothing is restored and
+// zeroWeight is not called. If zeroWeight fails, every address starts in
+// rotation.
+func (c *Checker) RestoreDown(lnc cdntypes.L4LBNodeConfig, zeroWeight func() (map[netip.Addr]struct{}, error)) {
+	if c.mode != ModeEnforce {
+		return
+	}
+	zero, err := zeroWeight()
+	if err != nil {
+		c.logger.Warn().Err(err).Msg("unable to read ipvs weights, starting with all cache nodes in rotation")
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, t := range targetsFromConfig(lnc) {
+		if _, ok := zero[t.Node.Addr]; !ok {
+			continue
+		}
+		c.tracker.restoreDown(t.Node, t.NodeName)
+		c.logger.Warn().Str("cache_node", t.NodeName).Str("address", t.Node.Addr.String()).
+			Msg("restored health check down state from ipvs weight 0")
+	}
+}
+
 // currentTargets returns the current targets and the generation they belong
 // to, read under the same lock so they always match. The targets are sorted
 // by address so rounds are built in a stable order.
@@ -174,7 +205,8 @@ func (c *Checker) runRound(ctx context.Context) {
 	targets, generation := c.currentTargets()
 
 	// With no targets (the config has no cache nodes) the round is empty but
-	// still processed, so cache nodes removed from the config are forgotten.
+	// still processed, so the metrics of cache nodes removed from the config
+	// are cleared.
 	round := make([]Observation, len(targets))
 	var wg sync.WaitGroup
 	for i, t := range targets {

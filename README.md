@@ -28,6 +28,14 @@ probed, and start over when they leave maintenance. The cache nodes probed
 and counted are exactly the ones in the l4lb config from the manager, which
 only lists the cache nodes in the l4lb node's own node group.
 
+In `enforce` mode a restart of the agent does not put taken out addresses back
+in rotation. Before it first applies the ipvs rules, the agent treats every
+address that is at weight 0 in ipvs but not in maintenance as already taken
+out, even when that is more than one node per family, and puts it back after 10
+consecutive successful probes like any other. This also applies to a weight 0
+set by hand or left from a node that left maintenance while the agent was not
+running. If the ipvs rules can't be read, every address starts in rotation.
+
 The probes are sent from inside the l4lb network namespace using
 `loopback_ipv4`/`loopback_ipv6` as source, so they follow the same path as the
 tunneled traffic. Timeouts, refused and unreachable connections and a `fail`

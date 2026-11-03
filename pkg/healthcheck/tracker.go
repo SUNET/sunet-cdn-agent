@@ -59,6 +59,19 @@ type nodeState struct {
 
 // Tracker decides from probe rounds which cache node addresses are down. It
 // is not safe for concurrent use.
+//
+// The Tracker keeps state for the addresses it has seen in Update or that
+// were restored as down. The Checker calls Update with the results of each of
+// its probe rounds, which cover every tracked address except ones restored at
+// startup that were not yet targets when the probe round started. Such an
+// address still counts as a peer and against maxDown, since it is out of
+// rotation, but nothing is decided about it until it is in a call to Update.
+// Addresses are only dropped by forget, which the Checker's SetConfig calls
+// for every tracked address that is not a target in the new config.
+// RestoreDown only restores addresses that are targets in the l4lb config
+// passed to it, using the ipvs weights to tell which of them are down, so
+// restored addresses are only dropped if a later config puts their node in
+// maintenance or removes it.
 type Tracker struct {
 	nodes map[NodeKey]*nodeState
 }
@@ -68,8 +81,10 @@ func NewTracker() *Tracker {
 	return &Tracker{nodes: map[NodeKey]*nodeState{}}
 }
 
-// Update records one probe round, which must contain every address to track,
-// and returns the decisions made.
+// Update records one probe round and returns the decisions made. Addresses
+// missing from the round keep their state and still count as peers and
+// against maxDown, but no decision is made about them until they are in a
+// round again. Use forget to stop tracking them.
 //
 // An address is taken out after downAfter consecutive failures, but only in a
 // round where it failed, and only if at most maxFailingFraction of the other
@@ -77,12 +92,11 @@ func NewTracker() *Tracker {
 // have an address of that family out. A node's own addresses do not count
 // against each other, so all addresses of a dead node can be taken out. It is
 // put back after upAfter consecutive successes. Outcomes that are neither
-// healthy nor failed change nothing. Addresses missing from the round are
-// forgotten.
+// healthy nor failed change nothing.
 func (t *Tracker) Update(round []Observation) []Transition {
-	seen := make(map[NodeKey]struct{}, len(round))
+	keys := make([]NodeKey, 0, len(round))
 	for _, o := range round {
-		seen[o.Node] = struct{}{}
+		keys = append(keys, o.Node)
 		n := t.nodes[o.Node]
 		if n == nil {
 			n = &nodeState{}
@@ -99,19 +113,10 @@ func (t *Tracker) Update(round []Observation) []Transition {
 			n.successStreak = 0
 		}
 	}
-	for k := range t.nodes {
-		if _, ok := seen[k]; !ok {
-			delete(t.nodes, k)
-		}
-	}
 
 	// Evaluate in a fixed order so that when more nodes qualify for removal
 	// than maxDown allows, it is always the ones sorted first that are taken
 	// out.
-	keys := make([]NodeKey, 0, len(t.nodes))
-	for k := range t.nodes {
-		keys = append(keys, k)
-	}
 	slices.SortFunc(keys, NodeKey.compare)
 
 	var out []Transition
@@ -149,6 +154,19 @@ func (t *Tracker) forget(drop func(NodeKey) bool) {
 	maps.DeleteFunc(t.nodes, func(k NodeKey, _ *nodeState) bool {
 		return drop(k)
 	})
+}
+
+// restoreDown marks the address as down, as if it had been taken out, so it
+// needs upAfter consecutive successes to be put back. It is not limited by
+// maxDown.
+func (t *Tracker) restoreDown(k NodeKey, name string) {
+	n := t.nodes[k]
+	if n == nil {
+		n = &nodeState{}
+		t.nodes[k] = n
+	}
+	n.name = name
+	n.down = true
 }
 
 // othersHealthy reports whether at least one other node with an address of

@@ -159,7 +159,7 @@ func TestTrackerRecovery(t *testing.T) {
 	}
 }
 
-func TestTrackerEmptyRoundForgetsNodes(t *testing.T) {
+func TestTrackerRoundWithoutAddressKeepsIt(t *testing.T) {
 	tr := NewTracker()
 
 	update(tr, downAfter, round(t, 5, OutcomeTimeout, 1))
@@ -167,9 +167,86 @@ func TestTrackerEmptyRoundForgetsNodes(t *testing.T) {
 		t.Fatal("n1 not down")
 	}
 
+	// A round can miss an address, such as one restored as down before it
+	// became a target. That says nothing about it, only forget removes it.
 	tr.Update(nil)
+	if !isDown(tr, 1) {
+		t.Fatal("n1 put back by a round without it")
+	}
+	tr.forget(func(k NodeKey) bool { return k == nodeKey(1) })
 	if isDown(tr, 1) {
-		t.Error("n1 still down after a round without nodes")
+		t.Error("n1 still down after being forgotten")
+	}
+}
+
+func TestTrackerNoDecisionWithoutObservation(t *testing.T) {
+	tr := NewTracker()
+
+	// n1 and n2 failing out of 4: both removals are blocked, since for each
+	// of them 1 of 3 others is failing.
+	update(tr, downAfter, round(t, 4, OutcomeTimeout, 1, 2))
+	if isDown(tr, 1) || isDown(tr, 2) {
+		t.Fatal("node taken down while too many nodes are failing")
+	}
+
+	// A round with only n2 passing. Peers are judged on their latest result
+	// whether or not they are in the round, so all of n1's peers now look
+	// healthy: n2 passes now, n3 and n4 passed in the earlier rounds. But
+	// there is no new probe result for n1, so it must not be taken down on
+	// its failure from before.
+	got := tr.Update([]Observation{obs("n2", "10.0.0.2", OutcomePass)})
+	if isDown(tr, 1) {
+		t.Errorf("n1 taken down in a round without it, transitions = %+v", got)
+	}
+}
+
+func TestTrackerRestoredDownNeedsUpAfter(t *testing.T) {
+	tr := NewTracker()
+	tr.restoreDown(nodeKey(1), "n1")
+	if !isDown(tr, 1) {
+		t.Fatal("restored n1 not down")
+	}
+
+	// A restored address comes back like any other down address.
+	update(tr, upAfter-1, round(t, 5, OutcomePass))
+	if !isDown(tr, 1) {
+		t.Fatalf("restored n1 back after %d successes, want down", upAfter-1)
+	}
+	got := tr.Update(round(t, 5, OutcomePass))
+	if len(got) != 1 || got[0].Kind != TransitionUp || got[0].Node != nodeKey(1) {
+		t.Fatalf("transitions = %+v, want n1 up", got)
+	}
+}
+
+func TestTrackerRestoredBeyondMaxDown(t *testing.T) {
+	tr := NewTracker()
+
+	// Restoring is not limited by maxDown: everything that was out stays
+	// out.
+	var restored []int
+	for n := 1; n <= maxDown+1; n++ {
+		tr.restoreDown(nodeKey(n), "")
+		restored = append(restored, n)
+	}
+	for _, n := range restored {
+		if !isDown(tr, n) {
+			t.Fatalf("restored n%d not down", n)
+		}
+	}
+
+	// While over the limit nothing more is taken out. Enough nodes that
+	// the failing ones stay within maxFailingFraction, so only maxDown
+	// can block.
+	next := maxDown + 2
+	size := int(float64(next)/maxFailingFraction) + 2
+	update(tr, downAfter, round(t, size, OutcomeTimeout, append(restored, next)...))
+	if isDown(tr, next) {
+		t.Errorf("n%d down while %d restored node(s) are out, maxDown = %d", next, len(restored), maxDown)
+	}
+	for _, n := range restored {
+		if !isDown(tr, n) {
+			t.Errorf("restored n%d put back while failing", n)
+		}
 	}
 }
 
@@ -248,8 +325,9 @@ func TestTrackerMissingAddressStartsOver(t *testing.T) {
 		t.Fatal("n1 not down")
 	}
 
-	// n1 is left out of the rounds, as when it is in maintenance: it is
-	// forgotten and frees the removal slot, so n2 can be taken out.
+	// n1 is forgotten and left out of the rounds, as when it is in
+	// maintenance: it frees the removal slot, so n2 can be taken out.
+	tr.forget(func(k NodeKey) bool { return k == nodeKey(1) })
 	update(tr, downAfter, round(t, 10, OutcomeTimeout, 2)[1:])
 	if isDown(tr, 1) {
 		t.Error("n1 still down while left out of the rounds")

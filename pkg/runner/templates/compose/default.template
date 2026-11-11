@@ -85,6 +85,9 @@ services:
     # to "none" adds some defense-in-depth in case e.g. someone tries to add
     # VCL config to reach out to the network somehow.
     network_mode: "none"
+    # If changing the command also verify if those changes should be added to
+    # sunet-vcl-validator so the VCL content it accepts is kept in sync with
+    # VCL accepted by the traffic serving instances.
     command: [
       "vinyld",
       "-F",

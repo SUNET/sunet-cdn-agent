@@ -2308,13 +2308,14 @@ func allowedHostsList(domainStrings []cdntypes.DomainString) string {
 	var b strings.Builder
 
 	for _, ds := range domainStrings {
-		// The haproxy acl uses the "host_only" converter which
-		// converts the header contents to lowercase, so the contents
-		// here must be lowercase as well to match. We use the
-		// golang.org/x/net/idna package to cleanup DNS names submitted
-		// to sunet-cdn-manager so we should not see non-lowercase
-		// domains at this point, but as we dont want to mess up the
-		// filter accidentally do ToLower just in case.
+		// HAProxy is configured to normalize the Host header using
+		// the "host_only" converter which converts the header contents
+		// to lowercase, so the contents here must be lowercase as well
+		// to match. We use the golang.org/x/net/idna package to
+		// cleanup DNS names submitted to sunet-cdn-manager so we
+		// should not see non-lowercase domains at this point, but as
+		// we dont want to mess up the filter accidentally do ToLower
+		// just in case.
 		b.WriteString(strings.ToLower(ds.String()))
 		b.WriteString("\n")
 	}

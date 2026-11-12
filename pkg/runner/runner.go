@@ -887,16 +887,21 @@ func (agt *agent) loadNewVcl(containerName string) error {
 
 	var vclConfigName string
 
-	// Build a name like "sunet-cdn-agent-1742080867-0"
+	// Build a name like "reload_sunet-cdn-agent-1742080867-000"
 	// where the first number is a unix timestamp and the
 	// second number is just a counter in case we somehow
 	// try to create more than one version inside the same
 	// second. Limit attempts to an upper bound so we dont
 	// loop forever if something is broken.
-	vclPrefix := "sunet-cdn-agent-"
+	//
+	// In order to interact well with prometheus_varnish_exporter use a
+	// "reload_" prefix like vinylreload uses and make sure the naming
+	// works with string sorting so the latest version sorts last (this is
+	// why the counter is padded with zeroes).
+	vclPrefix := "reload_sunet-cdn-agent-"
 	baseName := fmt.Sprintf("%s%d", vclPrefix, time.Now().Unix())
 	for i := range 1000 {
-		tmpName := baseName + fmt.Sprintf("-%d", i)
+		tmpName := baseName + fmt.Sprintf("-%03d", i)
 		if _, ok := usedNames[tmpName]; !ok {
 			// Not taken, use it
 			vclConfigName = tmpName

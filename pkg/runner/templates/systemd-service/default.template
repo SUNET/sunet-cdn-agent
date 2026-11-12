@@ -25,6 +25,9 @@ Environment="HOME=/root"
 ExecStart=/usr/bin/docker compose --project-name sunet-cdn-agent_cache_{{.OrgID}}_{{.ServiceID}} -f {{.ComposeFile}} up --force-recreate --no-deps
 
 ExecStop=/usr/bin/docker compose --project-name sunet-cdn-agent_cache_{{.OrgID}}_{{.ServiceID}} -f {{.ComposeFile}} down
+# Cleanup the named tmpfs volume on shutdown, no need to leave it if nothing is running.
+# Prefixed with "-" so we ignore errors if e.g. the volume does not exist.
+ExecStopPost=-/usr/bin/docker volume rm sunet-cdn-agent_cache_{{.OrgID}}_{{.ServiceID}}_vinyl-workdir
 
 NotifyAccess=all
 

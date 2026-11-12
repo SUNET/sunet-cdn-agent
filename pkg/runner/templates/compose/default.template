@@ -64,22 +64,12 @@ services:
     # so they can share some files like unix sockets.
     user: {{.VinylUID}}:{{.GID}}
     volumes:
+      - vinyl-workdir:/var/lib/vinyl-cache/vinyld
       - {{.VersionBaseDir}}:/service-versions:ro
       - {{.VinylUnixSocketsDir}}:/vinyl-unix-sockets
       - {{.HAProxyUnixSocketsDir}}:/haproxy-unix-sockets:ro
       - {{.CacheDir}}:/cache
       - {{.PurgerDir}}:/purger
-    # From https://www.varnish-software.com/developers/tutorials/running-varnish-docker/:
-    # ===
-    # The /var/lib/varnish folder is frequently accessed by the varnishd
-    # program. Loading this folder into memory and accessing it through tmpfs
-    # would accelerate access to this folder.
-    # ===
-    # Using the subfolder "varnishd" is an updated expectation, see
-    # https://github.com/varnish/docker-varnish/issues/51
-    # We now run vinyl-cache instead of varnish but the same reasoning holds.
-    tmpfs:
-      - /var/lib/vinyl-cache/vinyld:exec,uid={{.VinylUID}},mode=0750
     # Vinyl does not need to listen to any network ports as all communication
     # between it and haproxy happens over a UNIX socket. Setting network_mode
     # to "none" adds some defense-in-depth in case e.g. someone tries to add
@@ -128,3 +118,38 @@ services:
     restart: unless-stopped
     mem_limit: 32g
     memswap_limit: 32g
+  vinyl-exporter:
+    image: "{{.VinylImage}}"
+    entrypoint: ["/usr/local/bin/vinyl-exporter"]
+    user: {{.VinylUID}}:{{.GID}}
+    network_mode: "none"
+    volumes:
+      - vinyl-workdir:/var/lib/vinyl-cache/vinyld:ro
+      - {{.VinylUnixSocketsDir}}:/vinyl-unix-sockets
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 256m
+# From https://www.varnish-software.com/developers/tutorials/running-varnish-docker/:
+# ===
+# The /var/lib/varnish folder is frequently accessed by the varnishd
+# program. Loading this folder into memory and accessing it through tmpfs
+# would accelerate access to this folder.
+# ===
+# Using the subfolder "vinyld" is an updated expectation, see
+# https://github.com/varnish/docker-varnish/issues/51
+# We now run vinyl-cache instead of varnish but the same reasoning holds.
+#
+# We set this up as a named volume so it can be shared with the metrics
+# exporter.
+#
+# NOTE: removed on service stop by ExecStopPost in the systemd-service
+# template which refers to it by name; update both if renaming.
+volumes:
+  vinyl-workdir:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "exec,nosuid,nodev,uid={{.VinylUID}},mode=0750"

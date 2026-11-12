@@ -2405,6 +2405,13 @@ func (agt *agent) generateCacheFiles(cnc cdntypes.CacheNodeConfig) {
 		}
 	}
 
+	// Scrape targets are only metrics, so a failure here should not stop
+	// the services themselves from being configured.
+	err = agt.setupAlloyTargets(cnc.CacheNode.Name, allIPAddresses, alloyTargetsDir, 0, 0)
+	if err != nil {
+		agt.logger.Err(err).Str("path", alloyTargetsDir).Msg("unable to setup alloy targets")
+	}
+
 	modifiedSystemdServices := []string{}
 
 	// This map is a orgIDs -> serviceIDs where the active version changed

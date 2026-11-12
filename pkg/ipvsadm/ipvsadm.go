@@ -64,7 +64,7 @@ func (rs RealServer) String() string {
 }
 
 func (rs RealServer) deleteString() string {
-	// Expected output: -d -t 188.240.152.1:443  -r 192.36.171.94:443
+	// Expected output: -d -t 192.0.2.1:443  -r 198.51.100.94:443
 	var b strings.Builder
 
 	b.WriteString("-d")
@@ -170,7 +170,7 @@ func (rs RealServer) editString() string {
 
 // Will output the equivalent ipvsadm command to edit an existing service
 func (vs VirtualService) editString() string {
-	// Expected output: -E -t 188.240.152.1:443 -s mh
+	// Expected output: -E -t 192.0.2.1:443 -s mh
 	var b strings.Builder
 
 	b.WriteString("-E")

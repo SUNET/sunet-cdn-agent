@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,6 +50,11 @@ const (
 	// runs with network_mode "none" and never emits packets in the host netns.
 	// The actual range is defined in the database schema of sunet-cdn-manager.
 	tenantUIDRangeBase = 1000010000
+)
+
+var (
+	haProxyRe = regexp.MustCompile(`-haproxy-([0-9]+)$`)
+	vinylRe   = regexp.MustCompile(`-vinyl-([0-9]+)$`)
 )
 
 type config struct {
@@ -1001,17 +1007,21 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		orgID := containerName[len(containerPrefix) : len(containerPrefix)+uuidLen]
 		serviceID := containerName[len(containerPrefix)+uuidLen+1 : len(containerPrefix)+uuidLen*2+1]
 
-		if strings.Contains(containerName, "-haproxy-") {
+		if haProxyRe.MatchString(containerName) {
 			haproxyContainerService[containerName] = [2]string{orgID, serviceID}
 			markServiceModified(runningHAProxy, orgID, serviceID)
 		}
 
 		// Record containers for services who have had their active
-		// symlink updated, this affects all containers for that service
+		// symlink updated. This affects all containers that uses the
+		// versioned config tree for that service.
 		if _, ok := modifiedActiveLinks[orgID]; ok {
 			if _, ok := modifiedActiveLinks[orgID][serviceID]; ok {
-				agt.logger.Info().Str("container_name", containerName).Msg("active symlink changed, updating config")
-				containerActiveChanged[containerName] = struct{}{}
+				// Only haproxy and vinyl use the shared config tree, e.g. not vinyl-exporter
+				if haProxyRe.MatchString(containerName) || vinylRe.MatchString(containerName) {
+					agt.logger.Info().Str("container_name", containerName).Msg("active symlink changed, updating config")
+					containerActiveChanged[containerName] = struct{}{}
+				}
 			}
 		}
 
@@ -1020,7 +1030,7 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		// or an earlier pass without a successful reload since.
 		_, certModified := modifiedCerts[orgID][serviceID]
 		_, certRemoved := agt.pendingCertReloads[orgID][serviceID]
-		if (certModified || certRemoved) && strings.Contains(containerName, "-haproxy-") {
+		if (certModified || certRemoved) && haProxyRe.MatchString(containerName) {
 			agt.logger.Info().Str("container_name", containerName).Msg("active cert changed, needs to reload")
 			containerCertChanged[containerName] = struct{}{}
 		}
@@ -1029,10 +1039,10 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 		// config updated
 		if _, ok := modifiedActiveConfigs[orgID]; ok {
 			if ms, ok := modifiedActiveConfigs[orgID][serviceID]; ok {
-				if ms.haproxy && strings.Contains(containerName, "-haproxy-") {
+				if ms.haproxy && haProxyRe.MatchString(containerName) {
 					agt.logger.Info().Str("container_name", containerName).Msg("active haproxy config changed, needs to reload")
 					containerActiveConfigChanged[containerName] = struct{}{}
-				} else if ms.vinyl && strings.Contains(containerName, "-vinyl-") {
+				} else if ms.vinyl && vinylRe.MatchString(containerName) {
 					agt.logger.Info().Str("container_name", containerName).Msg("active vinyl config changed, needs to reload")
 					containerActiveConfigChanged[containerName] = struct{}{}
 				}
@@ -1075,13 +1085,13 @@ func (agt *agent) reloadContainerConfigs(modifiedActiveLinks map[string]map[stri
 	for _, containerName := range sortedMergedContainers {
 		// Do the right thing based on what type of container needs a reload.
 		switch {
-		case strings.Contains(containerName, "-vinyl-"):
+		case vinylRe.MatchString(containerName):
 			err := agt.loadNewVcl(containerName)
 			if err != nil {
 				continue
 			}
 			agt.logger.Info().Str("container_name", containerName).Msg("VCL updated")
-		case strings.Contains(containerName, "-haproxy-"):
+		case haProxyRe.MatchString(containerName):
 			err := agt.reloadHAProxy(containerName)
 			if err != nil {
 				ids := haproxyContainerService[containerName]
